@@ -22,11 +22,15 @@
 - 本文档**自包含**:不引用任何仓库外文档(上游 KernelPatch 的事实已内联到 §6)。
 - §2 的每条铁律都标注了 `[违例后果]`。这些不是代码风格偏好,是设计层面的安全契约。
 - **当前项目状态:设计阶段(pre-alpha)。** 仓库尚无代码——本文档描述的是**已拍板的目标架构**。
+  2026-11-08 六轮技术定稿已完成(Zw 时序模型 / 符号定位金字塔 / ART 定位链 / 动态探测 /
+  观测纯度 / 语言矩阵与构建分工),结论已固化进 §3/§5/§6——**这些是裁决不是草案,
+  勿重新开放已决问题**。
   诚实现状:代码实现时以本文档为准绳;实现过程中发现的偏差必须回写本文档(经人类维护者确认),
   而不是让代码悄悄偏离。**严禁把计划中的能力写成已实现**(人类 README 与本文档同受此约束)。
-- 你无法在本机运行内核测试(需要 ARM64 Android 设备 + KP 加载器)。你能做的验证是:
-  静态编译正确性推理、与本文档契约的一致性核对、协议文档(`docs/native-api.md`)与
-  UAPI 头文件的同步性校验。真机验证由人类执行(§8)。
+- 你可以在 Linux 沙箱构建 KPM(`aarch64-none-elf-gcc` + KP 检出环境,见 §8)与 daemon,
+  并跑协议一致性检查;但无法运行内核测试(需要 ARM64 真机 + KP 加载器)。静态推理、
+  与本文档契约的一致性核对、协议文档(`docs/native-api.md`)与 UAPI 头文件的同步性校验
+  是你的验证手段。真机验证由人类执行(§8)。
 - **生成代码时的默认姿态**:本项目的设计决策经常与"通用驱动开发"或"通用 Xposed 模块开发"的
   直觉相反(§3)。当你觉得"这里明显写错了"时,**先假设是你错了**,去 §2/§3 找依据;
   找不到再向人类提出质疑。
@@ -35,7 +39,7 @@
 
 ## 1. 项目本质(30 秒版)
 
-**KeModify = Android ARM64 内核级修改框架。单个 KPM(`kemodify.kpm`)经私有 syscall 通道向外暴露窄原语集(跨进程内存读写/搜索、syscall 结果塑形、进程事件),通道以 128 位 token + 逐模块能力集鉴权;调用方是非特权用户态二进制模块;root 守护进程 `kemodifyd` 管理模块生命周期并代理特权 ioctl。设计目标:目标进程内零代码驻留——只有被明确修改的数据不同。**
+**KeModify = Android ARM64 内核级修改框架。单个 KPM(`kemodify.kpm`)对外暴露窄原语集(跨进程内存读写/搜索、syscall 结果塑形、进程事件),通道 = **文件描述符句柄制**(开机一次 syscall 握手后,内核分发匿名 fd;此后所有通信走标准内核文件接口,句柄本身即凭证,逐句柄烙印能力位+作用域);调用方是以 nobody 身份运行的用户态二进制模块;root 守护进程 `kemodifyd` 管理模块生命周期并代理特权操作。设计目标:目标进程内零代码驻留——只有被明确修改的数据不同。**
 
 核心事实:
 
@@ -43,10 +47,16 @@
 |---|---|
 | KPM 形态,非 .ko、非 app | 以 KernelPatch Module 运行于内核空间;加载交给宿主加载器 |
 | 内核 = 纯执行器 | 无脚本引擎、无规则解释器、无业务逻辑(eBPF 哲学) |
-| 模块 = 非特权二进制 | 共享非特权 uid(默认 9000,低于 Android app 的 10000+ 段);身份靠 token |
-| 无 SDK | 模块侧契约 = 版本化 syscall ABI(UAPI 头文件 + 协议文档),零链接关系 |
+| 通道 = 句柄制(裁决,2026-11-08 二次定稿) | 开机握手(一次 syscall,带魔法数)→ 内核分发 anon fd;模块句柄由守护进程经 fd 传递(SCM)递给模块进程;之后全部通信走 read/write/ioctl 标准接口。句柄即凭证:不可猜(内核记账)、不可偷(仅持有者可用)、进程死自动失效(内核 close 回调)。先例:KSU 2025-11 起(reboot syscall 一次性握手 → anon_inode fd,此后全走 ioctl) |
+| 模块 = nobody 二进制,无常驻(裁决) | 全体模块以 uid 9999(nobody)运行——权限最小、进程表隐身、读不了任何 app(正门是唯一路);**无常驻模型**:模块平时不存在,事件来了被拉起,干完就退 |
+| 模块旁路能力 = 守护进程代理(裁决) | 模块自身无网络权限;联网(卡密验证等)经守护进程代理命令,清单声明域名、安装时亮给用户;文件目录由守护进程预建。所有旁路收进框架管子,每根有阀门 |
+| 无 SDK | 模块侧契约 = 版本化 ABI(UAPI 头文件 + 协议文档),零链接关系 |
 | 加载器无关 | APatch / SukiSU-Ultra(需 KP 补丁 boot)/ 裸 KernelPatch 均可加载;永不依赖任何管理器 app 或 SukiSU 私有 extension ioctl |
 | 与 LSPosed 正交 | 方法级进程内 hook 是 LSPosed 的领域;本框架只做进程外的 syscall 塑形与数据操纵 |
+| 授权体系照抄 LSPosed(裁决) | 模块开关 + 作用域勾选(含 system_server/android 项);推荐作用域预勾、静态作用域、多用户同包名全覆盖;内核逐命令强制作用域(三层检查之三,RL-04a) |
+| 实现语言(裁决) | KPM=C(KP 工具链锁死);daemon=Rust(ksud 先例);WebUI=TypeScript;模块模板=C+Rust 双份 |
+| 构建分工(裁决) | owner 开发机是 Windows;Linux 侧构建(KPM 交叉编译等)由协作 Agent 在 Linux 沙箱承担(§8) |
+| ART 定位(裁决) | 机制(Ldr/Ke 走链)进内核,ART 版本偏移进用户态 locator profile,永不进内核(RL-18) |
 | bug = 砖/开机循环 | KPM 没有用户态容错边界;`KPM_EXIT` 清理路径与 `KPM_INIT` 同等重要 |
 
 **名字语义(勿漂移)**:致敬 Windows 内核执行例程族(`Ke*`)。`KeStackAttachProcess`——
@@ -81,6 +91,13 @@ API 分类学因此借用 Windows 内核命名法(§5),这是刻意的身份认�
   `printk` 洪水、绝不浮点运算。日志一律限流(同 (op,target) 计数 + 周期采样)。
   `[观测体系自身成为放大器;ARM64 内核态 FP 需显式保存恢复]`
 
+- **RL-04a** 逐命令目标作用域强制(2026-11-08 裁决):每条作用于目标进程的命令,
+  在能力检查之后、执行之前**必须**核对"目标进程的包名在调用模块的作用域清单内"
+  (守护进程存包名,事件到达时换算 uid;多用户/分身同包名全覆盖,照抄 LSPosed)。
+  作用域清单是用户在 WebUI 勾选的(含 system_server/android 项,推荐作用域预勾、
+  静态作用域支持),模块自身声明无效。
+  `[无作用域强制 = 装一个模块等于给它的作用域全集发了 root 级读写券——授权模型空谈]`
+
 - **RL-05** 跨进程内存写遇到只读目标页时,必须走 `mm/` 内统一的页表遍历路径
   (改 PTE 临时可写 → 写 → 恢复 → flush),该实现只允许存在一份。绝不内联第二份拷贝。
   `[两份实现 = 两处会漂移的页表语义;漏恢复 = 目标进程拿到永久可写 .text = 可检测痕迹 + 数据竞态]`
@@ -91,22 +108,36 @@ API 分类学因此借用 Windows 内核命名法(§5),这是刻意的身份认�
 
 ### C. 信任模型纪律(模块永远摸不到 root)
 
-- **RL-07** 模块进程**永不**以 root/manager uid 运行。spawn 流程固定:
-  校验 manifest → `ObRegisterModule`(内核铸造 token)→ fork → setgroups/setgid/setuid 9000
-  → exec,token 经 argv 传递。任何"这个模块比较特殊,给它 root 方便调试"的想法都拒绝——
-  调试用 gateway 的调试命令 + daemon 侧日志。
-  `[模块拿到 root = 信任模型崩塌 = 恶意/被入侵的模块等于内核本身。这是本框架与"脚本合集"的分界线]`
+- **RL-07** 模块进程**永不**以 root/shell/manager uid 运行,固定以 **nobody(9999)** 运行
+  (2026-11-08 裁决;曾议 shell/自定义 9000 段均否决——shell 权限过高,自定义 uid 可被
+  app 通过用户管理服务枚举,是自挂牌)。spawn 流程固定:
+  校验 manifest → 内核铸造模块句柄(烙印能力位+作用域)→ fork → setgroups/setgid/setuid 9999
+  → exec,**句柄经 fd 传递(SCM_RIGHTS)从守护进程递进子进程**——绝不经 argv/环境变量
+  (nobody 同 uid 邻居可互读 /proc)。模块数据目录由守护进程在安装时预建(nobody 可写)。
+  任何"这个模块比较特殊,给它 root 方便调试"的想法都拒绝——调试用 gateway 的调试命令
+  + daemon 侧日志。
+  `[模块拿到 root = 信任模型崩塌;nobody 身份是作用域强制的物理前提——模块自己碰不了任何 app,正门是唯一通路,RL-04a 才查得住。这是本框架与"脚本合集"的分界线]`
 
-- **RL-08** token 鉴权与能力检查**必须**在任何参数解析之前完成:先查 token → 再查该模块
-  allowed_ops 是否含此 op → 然后才碰用户指针。越权返回 `-EACCES`;`-EPERM` 保留给
-  框架级拒绝(如安全模式)。token 比较必须常数时间;token 一次性铸造、永不复用、
-  卸载即失效。
-  `[先解析参数再鉴权 = 未授权调用者可以触发 copy_from_user 的 bug 面;非常数时间比较 = 时序侧信道]`
+- **RL-07a** 模块旁路能力一律经守护进程代理(2026-11-08 裁决):模块自身无网络权限;
+  联网需求(卡密验证、更新检查)走守护进程代理命令——模块清单声明允许连接的域名,
+  安装时亮给用户,守护进程核对域名后代发并记账。文件写入仅限守护进程预建的自身目录。
+  要新能力 = 协议加命令(带审计),不是给身份加权限。
+  `[nobody 的"小"是设计的一部分:所有旁路收进框架管子,每根有阀门——直接给身份加权限(自定义 uid/网络组)均已被否决]`
 
-- **RL-09** token **绝不**落盘、绝不写日志、绝不经任何世界可读文件传递。
-  内核注册表是运行时状态——重启后由 daemon 从磁盘上的**非密**注册信息(uid/能力集/模块 id)
-  重放,内核铸造**新** token。
-  `[落盘 token = 任何 root 程序可窃取模块身份;这也是为什么持久化属于 daemon 而不属于 KP kstorage]`
+- **RL-08** 句柄制鉴权(2026-11-08 句柄定稿改写):通信走标准内核文件接口
+  (read/write/ioctl on 框架句柄),**鉴权在 fd 层一次完成**——内核句柄表就是
+  凭证本身(文件描述符不可跨进程猜取/伪造,fd 表项带属主)。命令分发时三层
+  不可重排:**查句柄**(fd → 模块登记项,内核一次表查询)→ **能力位**(该句柄
+  烙印的 allowed_ops 含此命令族?)→ **目标作用域**(RL-04a:目标包名在该句柄
+  作用域清单内?)。越权返回 `-EACCES`;`-EPERM` 保留给框架级拒绝。
+  模块卸载/强杀/进程崩溃 → 句柄 close 回调**自动**撤销全部登记(无需显式
+  撤销代码);重启后守护进程重放注册,内核铸造新句柄。
+  `[句柄即凭证取代 128 位 token:不可猜(非数值密码,是内核记账)、不可偷(仅持有进程可用)、死亡即失效(close 回调免费)。曾经 token 体系的全部难题(常数时间比较/递送通道/复用防护)被 fd 语义整体消解]`
+
+- **RL-09**(句柄制下大幅简化)内核登记表是运行时状态,重启即清;守护进程磁盘
+  注册表存**非密**信息(模块 id/能力位/作用域包名清单),开机重放、内核重新铸造
+  句柄。句柄数字本身毫无价值,无需保密——泄了也只在持有进程内有效。
+  `[持久化属于 daemon;内核态零持久化 = kstorage 不用]`
 
 ### D. 契约纪律(ABI 是唯一接口)
 
@@ -115,7 +146,7 @@ API 分类学因此借用 Windows 内核命名法(§5),这是刻意的身份认�
   `[SDK = 链接关系 = 许可证传染争议 + 版本耦合;syscall ABI 是 arm's-length 边界,Linux 世界 30 年验证过的模式。模块闭源合法性依赖此边界]`
 
 - **RL-11** 命令码**永不重编号**。分配区间:`0x1000+` Ke、`0x2000+` Mm、`0x3000+` Ps、
-  `0x4000+` Zw、`0x5000+` Ob。废弃的码保留取值并返回 `-EOPNOTSUPP`;新增只追加。
+  `0x4000+` Zw、`0x5000+` Ob、`0x6000+` Ldr。废弃的码保留取值并返回 `-EOPNOTSUPP`;新增只追加。
   任何 struct 布局变更必须升 `KEMODIFY_PROTO_VERSION`(gateway 对不匹配返回 `-EPROTO`)。
   `[无 SDK 保护的生态里,ABI 破坏 = 所有第三方模块同时死亡;协议文档与 UAPI 头文件必须同 commit 变更]`
 
@@ -140,7 +171,63 @@ API 分类学因此借用 Windows 内核命名法(§5),这是刻意的身份认�
   `GPL-3.0 OR Apache-2.0` 双许可;协议文档同样双许可。KernelPatch 上游是
   `GPL-2.0-or-later`(已核实其源码 SPDX),GPL-3.0 调用其导出符号兼容。
   人类 README 的非商业声明与 GPL-3.0-only 立场是 owner 的既定法律姿态,不得弱化。
+  **module-template 的 C 与 Rust 模板文件同样单独 Apache-2.0**——模板带 GPL 头 =
+  闭源模块作者复制模板第一步即被传染。
   `[双许可 UAPI 是闭源模块合法性的支点;单方面收紧/放宽都是生态事故]`
+
+### G. 定位与观测纪律(2026-11-08 技术定稿追加)
+
+- **RL-16** 符号解析纪律:全部符号在 `KPM_INIT` 一次性预解析进函数指针表;热路径
+  (hook 回调/命令分发)**零解析**。每个原语声明符号依赖,解析失败自动级联降级为
+  `-EOPNOTSUPP`(用户在 WebUI 看到"此内核缺少 X,Y 能力不可用",不是神秘 panic)。
+  版本矩阵(PTE walk 族)只允许存在于 `mm/` 模块内。resolver 一律
+  `kallsyms_lookup_name_by_suffix`(CFI/LTO 克隆),优先函数符号、避免数据符号。
+  `[热路径解析 = 每次调用付查找成本 + 失败面进入 syscall 路径;分散的版本 if/else = 每个内核一个分支炸弹]`
+
+- **RL-17** 观测纯度(RL-01 的强化升级):**对目标的任何原语操作不得改变目标可观测的
+  状态**。具体:Mm 读取/搜索族默认 present-only 逐页谓词(内核页表 walk,只读)——
+  present 才读,不 present 跳过,**绝不替目标分配页**(内存蜜罐防御:app 可用
+  mincore 轮询自己未触碰页的驻留位);zram 换出页同样跳过(不触发解压回填)。
+  触碰冷页必须走显式 `MM_READ_FAULTIN` 变体,痕迹决策留给模块作者。
+  `[读取留痕 = "不可检测"从构造保证退化为实现质量;蜜罐页被缺页分配 = 向目标宣告"有东西在读我"]`
+
+- **RL-18** ART/宿主结构偏移**永不进内核**:内核只提供通用机制(Ldr 模块/符号解析、
+  Ke 链式指针读取、Mm 批量读);版本知识(锚点策略 + 每跳偏移)住在用户态
+  locator profile(JSON,按 Android 版本分发)。新 Android = 更新 profile 数据,
+  内核零重编。
+  `[偏移进内核 = 每年重编 KPM + 内核承载最易碎的知识;profile 是数据,数据可以热更]`
+
+- **RL-19** Zw 塑形注册**必须** `hook_syscalln_override`,绝不用 `hook_syscalln`
+  (后者被 KP 的 su_syscall_gate 过滤——塑形目标是普通 app,普通注册的回调
+  **静默永不触发**,见 §6.1);且回调**首行**必须 uid 快速失败(单次 cmp)。
+  `[用错 API 不报错、不崩溃,只是安静地什么都不发生——最危险的失败模式]`
+
+### H. 生命周期与门禁纪律(2026-11-08 追加)
+
+- **RL-20** 无常驻模型:模块**不常驻**——平时不存在(零进程零内存),目标进程
+  诞生事件(内核在 execve 最早瞬间发现)→ 守护进程拉起关心它的模块(事件+token
+  写进标准输入)→ 模块一次生命周期内干活、登记监听规则 → exit 退出。进程退出
+  = 模块本轮结束,无崩溃恢复复杂度(下次事件再拉起)。守护进程对同模块做简单
+  节流:在跑不重复拉,事件排队。
+  `[常驻模块 = 常驻内存/常驻进程表条目/崩溃恢复复杂度三宗罪;持续监控由内核监听规则承担(§6.6),不需要活着的进程]`
+
+- **RL-21** 先礼后兵(目标退出联动,2026-11-08 裁决):目标进程退出 → 内核通知
+  守护进程 → **逐个告知**:作用域内每个目标死亡都通知模块("某某退出了",模块
+  自行撤监听、调整策略)→ 作用域内目标**全部**死亡 → 发"收工"通知(礼)→
+  宽限期(用户可调,默认 3 秒)→ 仍未退出 → 强杀(兵)。目标进程注销时其关联
+  监听规则自动清理。
+  `[生命周期强制对齐:目标生模块起、目标死模块收、赖着不走替你走;逐个告知让多目标模块能精细收尾,全死强杀才不冤]`
+
+- **RL-22** 句柄制定稿(2026-11-08 二次裁决,**取代**原 syscall+暗号通道设计;
+  token/常数时间比较/透传失败响应等前设计全部作废):通道 = 开机一次 syscall
+  握手(带魔法数,root 发起)→ 内核分发框架句柄(anon fd)→ 之后所有通信走
+  标准文件接口。模块句柄经 SCM_RIGHTS 递进子进程。**syscall 入口只在开机
+  用一次**:选号从"终生冻结的重大决定"降级为"挑个不撞车的"(启动探测照旧,
+  应答异常 = 拒绝启动,宁死不撞车)。app 探测该号(若它真去调):极低频流量 +
+  透传真 handler = 与原厂一致。环境先例:KSU 2025-11 起即此模式(reboot 握手 →
+  anon_inode:[ksu_driver] fd → 全 ioctl);binder/ashmem 等系统组件同构——
+  nobody 进程持一个匿名 fd 毫无异常。
+  `[句柄制的本质:把"验证身份"从每次调用一次,折叠成 fd 表一次;凭证难题被内核文件语义整体吸收。验证性风险(诚实):严格 SELinux 策略下 nobody 对 fd 的 ioctl 是否放行——首批真机必须验证项]`
 
 ---
 
@@ -160,6 +247,18 @@ API 分类学因此借用 Windows 内核命名法(§5),这是刻意的身份认�
 | "gateway 用 binder/socket 更标准" | 新增 fd/socket = 目标无关但环境可检测的痕迹;且 binder 在 KPM 里不可用 | 冷门 syscall 号 + 参数帧(版本+命令+token)是唯一通道形态 |
 | "加载失败自动降级成 .ko 试试" | 框架不碰加载(RL-14) | 加载失败 = 如实报错给用户,让宿主解决 |
 | "给 WebUI 加远程访问方便调试" | 攻击面 | WebUI 仅 localhost(KSU WebUI 惯例) |
+| "hook_syscalln 是标准 API,注册就用它" | KP 全局分发器的 su gate 只放行 root/su-allow/manager uid;塑形目标是普通 app——普通注册的回调**静默永不触发** | 必须 `hook_syscalln_override`(RL-19,§6.1);回调首行 uid 快速失败 |
+| "skip_origin 伪造返回最简单" | 比真调用**更快**也是时序指纹(真 statx 冷路径 μs 级,伪造 100ns 返回 = 分布异常) | 策略优先级:重定向 > after 改写 > skip+延迟垫底(§6.3 R4) |
+| "规则按 syscall 号建模,一个一个来" | openat 塑形而 newfstatat 不塑形 = open 成功 stat ENOENT 的逻辑矛盾,比时序泄漏更糟 | 路径规则落到整个 stat/open/access 族 + compat 孪生(§6.3 R5) |
+| "进程事件要 hook wake_up_new_task 或 netlink" | 新 hook = 新符号 = 新时序面 | Ps spawn/exit 寄生在 Zw 层 execve 回调,零新增(§6.2) |
+| "ART 偏移矩阵编进内核更高效" | ART 每年一版;偏移进内核 = 每年重编 KPM + 内核承载最易碎知识 | 机制进内核(Ldr/Ke 走链),知识进用户态 profile(RL-18,§6.5) |
+| "跨进程读直接 access_process_vm 整段读最简单" | 读冷页触发缺页分配 = 内存蜜罐可检测(app 用 mincore 轮询驻留位) | present-only 逐页谓词构造性排除(CE "Active memory only" 教训,RL-17,§6.4) |
+| "KPM 用 C++/Rust 更现代" | KP 工具链纯 C;freestanding 无 libstdc++;Rust 需 no_std 重实现整套 KPM ABI = 纯负担 | KPM=C;现代性由 daemon(Rust)承担(§4 语言矩阵) |
+| "daemon 用 Go/Kotlin 也行" | Go:二进制体积 + raw syscall 边角失控;Kotlin:root 守护进程拖 ART 运行时,启动/被杀重启全是麻烦 | Rust(ksud 先例 + bindgen 消费 uapi 单一事实源) |
+| "模块给 shell/自定义 uid,再配点权限" | shell 权限过高(adb 组旁门);自定义 uid 可被 app 经用户管理服务枚举 = 自挂牌 | nobody(9999) + 旁路能力走守护进程代理(RL-07/07a) |
+| "模块要常驻才能持续监控" | 持续监控的动作在内核监听规则里(§6.6),不需要活着的进程 | 无常驻模型:事件拉起、干完就退(RL-20) |
+| "每次调用都要带 128 位暗号验身份" | 每次验证 = 每次付比对成本 + 一整套凭证管理难题(防猜/防偷/递送/复用) | 句柄制:开机一次握手,fd 即凭证——验证折叠进内核 fd 表,凭证难题被文件语义整体吸收(RL-08/22;先例 KSU 2025-11) |
+| "网络代理给模块直接发权限更简单" | 模块自带网络权 = 不可审计的旁路;付费生态最被诟病的"偷偷连网" | 守护进程代理:清单声明域名、安装亮给用户、统一记账(RL-07a) |
 
 ---
 
@@ -179,15 +278,18 @@ kemodify/
 │   ├── zw/                     # syscall 塑形(构建于 hook_syscalln 之上)
 │   ├── ob/                     # 模块注册表:token、能力集、撤销
 │   └── include/kemodify/       # 内核内部头
-├── daemon/                     # kemodifyd(Rust 优先;root 运行)
+├── daemon/                     # kemodifyd(Rust;root 运行;bindgen 消费 uapi/ 头——协议定义单一事实源)
 │   ├── install/                # 模块 zip 校验、解包、内核注册
 │   ├── spawn/                  # fork → drop uid → exec 模块二进制(RL-07 流程)
 │   ├── registry/               # 磁盘注册表(非密信息;重启重放用,RL-09)
-│   └── webui/                  # localhost HTTP,服务框架与各模块 webroot/
+│   └── webui/                  # localhost HTTP(静态 webroot + REST);TS,vanilla/Preact,KSU WebView 打开
 ├── uapi/                       # Native API 头文件(双许可,稳定 ABI,RL-12)
-│   ├── kemodify.h              # 命令码、结构体布局、协议版本
+│   ├── kemodify.h              # 命令码、结构体布局、协议版本(C 头=单一事实源,Rust 侧 bindgen 消费)
 │   └── capability.h            # 能力位定义
 ├── module-template/            # 全原语演示模块 = 集成测试载体
+│   ├── template-c/             # C 模板:裸 ABI 示范,零依赖——单独 Apache-2.0(RL-15)
+│   └── template-rust/          # Rust 模板:安全绑定示范——单独 Apache-2.0(RL-15)
+├── tools/                      # Rust 工具链(ART profile 生成器:从 AOSP 源码算各版本偏移)
 ├── docs/
 │   └── native-api.md           # KeModify Native API Reference(协议规范)
 └── (KSU 模块包装:service.sh、customize.sh、metainfo——随发布打包)
@@ -196,19 +298,36 @@ kemodify/
 关键数据流(一屏版):
 
 ```
-开机: 宿主加载器加载 kemodify.kpm → KPM_INIT(gateway 自挂、能力表初始化)
-  → KSU service.sh 拉起 kemodifyd → 从磁盘注册表重放模块注册(内核铸造新 token)
-  → 逐个 spawn 模块(非特权 uid + token)
+开机: 宿主加载器加载 kemodify.kpm → KPM_INIT(gateway 自挂、启动探测(号被占则拒绝启动)、
+  能力表初始化) → KSU service.sh 拉起 kemodifyd
+  → kemodifyd 一次性 syscall 握手(带魔法数,root) → 内核分发框架句柄(anon fd)
+  → 从磁盘注册表重放模块注册(内核为每模块铸新句柄,烙印能力位+作用域)
+  ——注意:此时不 spawn 任何模块(无常驻,RL-20)
 
-模块调用: 模块二进制 → syscall(gateway_nr, 帧{proto_ver, cmd, token, args})
-  → 内核: 验 token → 验能力集(RL-08) → 分发到 ke/mm/ps/zw/ob 例程
+模块生命周期(无常驻模型,RL-20/21):
+  目标进程诞生(execve 最早瞬间,内核 Ps 寄生回调) → 唯一通知守护进程(点对点)
+  → 守护进程查作用域登记表(谁关心这个包名) → 拉起对应模块
+    (fork → nobody → exec;模块句柄经 SCM_RIGHTS 递进子进程;事件写标准输入)
+  → 模块干活:对句柄 read/write/ioctl(读写内存/搜索/登记监听规则 MmWatch/
+    经代理联网 RL-07a)→ 干完 exit 退出(本轮结束;句柄随进程关闭自动失效)
+  运行中:值变化 → 内核监工自动执行(改写等,模块不在场也生效,§6.6)
+  某目标死 → 逐个通知模块(撤监听/调整) → 作用域内目标全死 → "收工"通知
+  → 宽限(用户可调,默认 3s)→ 未退 → 强杀;目标注销自动清理其监听规则
+
+模块调用(句柄制): 模块对句柄 ioctl/read/write,帧{proto_ver, cmd, args}
+  → 内核三层检查(RL-08): 查句柄(fd→登记项)→ 能力位 → 目标作用域(RL-04a)
+  → 全过 → 分发到 ke/mm/ps/zw/ob 例程;不过 → -EACCES
   → 例程经 access_process_vm / hook_syscalln 作用于目标进程
 
 syscall 塑形: 目标进程调 openat/read/... → KP invoke_syscall 全局分发
   → Kemodify Zw 层 before/after 回调(受 RL-03 约束)→ 结果塑形 → 返回目标
 
-卸载: 用户在宿主管理器卸载 KSU 模块 → daemon 停止 → ObRevokeToken × N + 杀模块进程
-  → KPM_EXIT 对称卸载全部 hook(RL-06)
+ART 定位(原语组合示例,§6.5): Ps spawn 事件 → ART 就绪锚点探测
+  → LdrGetModuleHandle(pid,"libart.so") → LdrGetProcedureAddress(锚点符号)
+  → KeFollowPointerChain(profile 偏移,双走比对) → MmCopyVirtualMemory 批量读出原 dex
+
+卸载: 用户在宿主管理器卸载 KSU 模块 → daemon 停止(按 RL-21 流程收尾在跑模块)
+  → 句柄全数 close(登记自动撤销) → KPM_EXIT 对称卸载全部 hook(RL-06)
 ```
 
 ---
@@ -220,11 +339,12 @@ syscall 塑形: 目标进程调 openat/read/... → KP invoke_syscall 全局分�
 
 | 族 | Windows 语义 | KeModify 对应 | 命令码区间 |
 |---|---|---|---|
-| `Ke` | 内核执行层核心 | attach/detach、通道管理、执行原语 | `0x1000+` |
-| `Mm` | 内存管理 | 跨进程读/写/特征码搜索、页属性操作 | `0x2000+` |
-| `Ps` | 进程管理 | 进程定位、spawn/exit 事件注册 | `0x3000+` |
-| `Zw` | 系统调用层 | syscall 结果塑形的安装/卸载/枚举 | `0x4000+` |
+| `Ke` | 内核执行层核心 | attach/detach、链式指针读取(KeFollowPointerChain,双走比对内建)、通道管理 | `0x1000+` |
+| `Mm` | 内存管理 | 跨进程读/写/特征码搜索(present-only 默认)、dirty_only 扫描、页属性操作、**监听 API(MmWatch:脏位监工 + 可选自动改写,§6.6)** | `0x2000+` |
+| `Ps` | 进程管理 | 进程定位、spawn/exit 事件注册(寄生 Zw 层 execve 回调,§6.2) | `0x3000+` |
+| `Zw` | 系统调用层 | syscall 结果塑形的安装/卸载/枚举(时序防御模型见 §6.3) | `0x4000+` |
 | `Ob` | 对象管理器 | 模块注册表:注册/撤销/能力查询 | `0x5000+` |
+| `Ldr` | 加载器(模块/符号解析) | 跨进程模块基址、.dynsym 符号解析(ART 定位链的基石,§6.5) | `0x6000+` |
 
 命名映射示例(第三列是 Windows 真实 API,语义吻合是选择它的原因):
 
@@ -238,16 +358,23 @@ syscall 塑形: 目标进程调 openat/read/... → KP invoke_syscall 全局分�
 | `PsSetCreateProcessNotifyRoutine(cb)` | `PsSetCreateProcessNotifyRoutine` | spawn/exit 事件 |
 | `ZwHookSyscall(nr, match, transform)` | Zw 族(syscall 层) | syscall 塑形 |
 | `ObRegisterModule(token, caps)` | Ob 族(对象管理器) | 模块注册 |
+| `LdrGetModuleHandle(pid, name)` | `LdrGetDllHandle` | 跨进程模块基址(libart.so 等) |
+| `LdrGetProcedureAddress(pid, base, sym)` | `LdrGetProcedureAddress` | 跨进程 .dynsym 符号解析 |
+| `MmWatch(pid, addr, len, action)` | —(Mm 族自造) | 登记监听:值变化通知/自动改写(§6.6) |
+| `ObProxyRequest(url, ...)`(暂名) | —(Ob 族自造) | 守护进程代理网络请求(RL-07a;命名待协议文档定稿) |
 
 协议文档《KeModify Native API Reference》按族分章;Nt/Zw 二象性可作协议彩蛋
 (模块侧调用约定 = Nt 视角,内核侧处理 = Zw 视角),不作为功能面。
 
 ---
 
-## 6. 内核侧实现约束(KP 运行时事实,已对源码核实)
+## 6. 内核侧实现约束与技术定稿(已对上游源码核实)
 
-内核代码运行在 KernelPatch(当前 0.13.9)运行时内。以下是**已核实**的上游事实,
-新 Agent 不需要重新考古(来源:KernelPatch 仓库 `doc/en/*.md` 与源码):
+内核代码运行在 KernelPatch(当前 0.13.9)运行时内。§6.1 是**已核实**的上游事实
+(来源:KernelPatch 仓库 `doc/en/*.md` 与源码),新 Agent 不需要重新考古;
+§6.2-§6.5 是 2026-11-08 六轮技术定稿的结论固化——**它们是裁决,不是草案**。
+
+### 6.1 KP 运行时事实
 
 - **生命周期宏**:`KPM_NAME("kemodify")`(全内核唯一,控制/卸载的标识符)、
   `KPM_VERSION/LICENSE/AUTHOR/DESCRIPTION`、`KPM_INIT(fn)`、`KPM_CTL0(fn)`(用户态
@@ -256,8 +383,16 @@ syscall 塑形: 目标进程调 openat/read/... → KP invoke_syscall 全局分�
   优先在 `invoke_syscall`(所有 syscall 的公共必经点)挂**单个**全局 hook,syscall 表
   零修改、无 per-syscall 时序指纹;`invoke_syscall` 不可用时回退 `el0_svc_common`,
   再回退 per-syscall 的 `fp_hook_syscalln` / `inline_hook_syscalln`。
-  **要 `skip_origin`(吞掉原 syscall)必须用 `hook_syscalln_override`**;
-  `hook_syscalln` 不认 skip_origin。
+- **⚠️ _override 陷阱(Zw 层生死级事实,RL-19 的来源)**:全局分发器启用时,
+  `hook_syscalln` 注册的回调会先过 KP 的 `su_syscall_gate`(只放行
+  uid==0 / su-allow / trusted-manager,见 sucompat.c)——**Zw 塑形的靶子是普通
+  app(非 su uid),普通注册的回调不会触发,而且是静默不触发**。必须用
+  `hook_syscalln_override`(注册带 `bypass_gate=1` + `allow_skip=1`,KP 的
+  magic supercall 用的就是这个口子)。推论:bypass 注册的回调对该 nr 的**所有进程**
+  都会进入——回调第一行必须 uid 快速失败(单次 cmp;该常数对所有调用者一致,
+  跨进程对比不可见)。初始化时用 `syscall_hook_global_enabled()` 探测模式。
+  另:`skip_origin` 仅在 handler 粒度(invoke_syscall)被尊重,吞 syscall 时必须
+  同时设 `args->ret`(分发器会把它写进 regs->regs[0])。
 - **参数访问**:一律 `syscall_argn(args, n)` / `set_syscall_argn(args, n, val)`,
   绝不裸读 `args->argN`——带 syscall wrapper 的内核首个参数是 `pt_regs *`。
 - **用户态访问**:hook 回调内用 `compat_copy_to_user` / `compat_strncpy_from_user`
@@ -265,10 +400,22 @@ syscall 塑形: 目标进程调 openat/read/... → KP invoke_syscall 全局分�
 - **inline hook**:`hook_wrap(func, argno, before, after, udata)` 链式(每函数上限 16
   项,插入序,无优先级);同一回调指针重复注册返回 `HOOK_DUPLICATED`。
   卸载用 `hook_unwrap(func, before, after)` 传原指针。
-- **进程定位**:`find_get_task_by_vpid(pid)` / `get_task_mm(task)`——KP 在
-  `kernel/linux/include/linux/sched/` 提供了 kfunc 封装头,**优先用这些头**;
-  不在封装内的内核函数(如 `access_process_vm`)用
-  `kallsyms_lookup_name("...")` 取址后按函数指针调用。
+- **进程定位与 kfunc 库存**:`find_get_task_by_vpid(pid)` / `get_task_mm(task)`——KP 在
+  `kernel/linux/include/linux/sched/` 提供了 kfunc 封装头,**优先用这些头**。
+  KP 启动时自解析的 kfunc 远不止这两个(ksyms/misc.c,已核实):完整 cred 族
+  (`prepare_kernel_cred`/`commit_creds`/`override_creds`/`revert_creds`)、
+  pid/task 族(`find_task_by_vpid`/`pid_task`/`get_pid_task`)、mm 族
+  (`mm_access`/`get_task_exe_file`)、usercopy 助手(`memdup_user`/`strndup_user`)、
+  `_raw_spin_lock` 族、`stop_machine`——写代码前先查库存,已有的直接调。
+  **`access_process_vm` 零覆盖**——Tier 2 自行解析(见 §6.2)。
+- **CFI/LTO 克隆**:resolver 一律 `kallsyms_lookup_name_by_suffix(name)`,绝不用裸
+  `kallsyms_lookup_name`——Clang CFI 内核里函数有 `.cfi_jt` 跳板,LTO 生成
+  `name.llvm.<hash>` 克隆,裸精确名会 miss。inline hook 目标尤其要验证 hook 到的
+  是函数体还是跳板(语义不同)。
+- **kallsyms 根信任**:上游 5.7+ 不再导出 `kallsyms_lookup_name`;KP 的运行时查找
+  是自建的——kptools 在**安装时**离线解析 boot.img 把地址烘焙进 kpimg(predata)。
+  因此 Tier 2 对 KPM 是可靠地基。已知坑:`CONFIG_KALLSYMS_ALL=n` 的内核 kallsyms
+  缺数据符号——**resolver 优先函数符号,避免依赖数据符号**。
 - **运行时版本常量**:`kver`(内核版本码)、`kpver`(KP 版本码)可直接引用。
 - **热路径纪律**:syscall hook 的 before/after 是热路径——RL-03/RL-04 的来源。
 
@@ -276,16 +423,218 @@ syscall 塑形: 目标进程调 openat/read/... → KP invoke_syscall 全局分�
 `HOOK_CHAIN_FULL`(16 项满)是真实错误码,KeModify 自身的 Zw 塑形层要做配额管理,
 不能把 KP 的链配额吃光。
 
+### 6.2 符号定位金字塔(原语 ↔ 定位链对照)
+
+核心原则:**把最多的能力压在最稳的层**。塔顶零成本永固,塔底版本敏感。
+
+| 层 | 手段 | 可靠性 | 承载 |
+|---|---|---|---|
+| Tier 0 | syscall 号(arm64 冻结 ABI) | 永固,零成本 | Gateway 通道、Zw 塑形、Ps 事件(寄生 execve 回调) |
+| Tier 1 | KP kfunc(启动期已解析) | 免费 | 进程定位、cred 操作、usercopy、mm_access |
+| Tier 2 | `kallsyms_lookup_name_by_suffix` | 高(安装时烘焙) | `access_process_vm` 等自解析函数 |
+| Tier 3 | 枚举+结构锚定(`kallsyms_on_each_symbol` / init_task→init_mm / BTF) | 版本敏感 | 兜住被内联/改名符号;BTF 给类型不给地址 |
+| Tier 4 | PTE walk 族(pud/pmd/pte_offset_map/TLB flush) | **唯一硬骨头** | RO 页写入;签名 5.10→6.6 间漂移(pte_offset_map 5.13 改 API) |
+
+- **Ps spawn/exit 事件零成本实现**:不 hook `wake_up_new_task`、不用 netlink——
+  **寄生在 Zw 层 execve 回调**(app 冷启动必经,目标 uid 命中即入事件队列),模块经
+  Ps 族命令消费。零新增 hook、零新增符号、零新增时序面。
+- **RO 页写入分期**:v1 只支持 RW 页写入(数值修改主场景,游戏数值都在 RW 数据段);
+  RO 页(.data.rel.ro/字符串常量)写入带 PTE 矩阵 v1.5 再上——`access_process_vm`
+  内部走 GUP 已覆盖大部分场景,只有目标页只读才需要手工 walk。
+- **明确拒绝**:内存特征码扫描(版本脆弱)、硬编码机型偏移(每机型爆炸)。
+
+### 6.3 Zw 层时序防御模型(R1-R6)
+
+app 的测量手段只有 vDSO `clock_gettime` 夹逼:同进程跨 syscall 对比、同 syscall
+跨时间对比(冷启动存基线)、10⁶ 采样统计分辨(安静系统 ~10ns,真机噪声
+~100ns-1μs)。防御目标:**被塑形 syscall 的延迟分布与自然分布不可区分**。
+
+成本分层(①②③对所有进程/所有 syscall 恒定——任何差分对比不可见;对抗面只在 ④⑤):
+
+```
+① transit + KP 全局分发器     —— 全部进程 · 全部 syscall · 恒定
+② su gate 评估 + 槽位扫描      —— 同上(≤64 槽)
+③ 回调入口 + uid 快速失败     —— 被 hook nr 的全部调用者 · 同一常数(跨进程对称)
+④ 规则匹配(usercopy+hash)    —— 仅目标进程 · 仅该 nr · ~100-300ns
+⑤ 塑形工作                    —— 仅命中调用 ← 真正的对抗面
+⑥ 真 syscall 执行             —— μs 级自然方差(dcache/inode/调度抖动)· 天然掩体
+设计目标:③④⑤ 的增量沉入 ⑥ 的自然方差
+```
+
+- **R1 快速失败顺序**:uid cmp → nr 位图 → 规则匹配(非目标进程第 1 步出去)。
+- **R2 匹配成本封顶**:路径规则安装时预计算 hash 前缀;热路径一次有界 usercopy
+  (≤256B)+ 比较。路径类 syscall 自然方差 μs 级——增量深埋噪声。**这是选
+  openat/statx 族作主塑形面的物理理由**。
+- **R3 紧方差警戒**:getpid 类延迟分布极窄(几十 ns 方差),统计可分辨——不碰,
+  或带 latency_floor 垫底(有界自旋,原子上下文安全)。
+- **R4 伪造不是免费的**:skip_origin 让调用**变快**——比真快也是指纹(真 statx
+  冷路径 μs,伪造 100ns 返回 = 分布异常)。策略优先级:**重定向 > after 改写 >
+  skip+垫底**。重定向(改路径参数让真 syscall 跑真文件)延迟完全自然——KP
+  sucompat 正是此法(改 filename 指针指向合法路径)。
+- **R5 路径建模而非 syscall 建模**:一条路径规则落到整个 stat/open/access 族
+  (openat/newfstatat/faccessat/statx)+ compat 孪生(32 位探测路径)——
+  open 成功而 stat ENOENT 的逻辑矛盾比时序泄漏严重得多。
+- **R6 gateway 自身反探测**:非 token 调用**原样透传真 handler**(不碰参数、
+  不返回错误)——syscall 扫描器逐号探测看到的是真行为。绝不 -ENOSYS 短路。
+
+残余(记录不处理):规则表 L1 访问模式理论上可被 Prime+Probe 感知——极先进攻击,
+v1 如实标注。
+
+### 6.4 Mm 层观测纯度(present-only 构造保证)
+
+来源:CE(Cheat Engine)源码研究(2026-11-08,memscan.pas)。CE 的
+"Active memory only"(`QueryWorkingSet` 快照 → 只扫驻留页,合并连续驻留页为区域)
+本是性能优化,恰好构成内存蜜罐的完整防御——读驻留页不触发缺页分配,蜜罐页
+(mmap 后从未触碰 = 不在 working set)天然被排除。CE 另有 VQE_PAGEDONLY /
+VQE_DIRTYONLY 变体。
+
+KeModify 把它升级为**构造保证而非使用纪律**(RL-17):Mm 读取/搜索默认逐页
+`pte_present` 原子谓词(内核页表 walk,只读)——present 才读,不 present 跳过,
+**绝不替目标分配页**。与 CE 的差异:CE 用户态"先查后读"有 TOCTOU 窗口,
+内核逐页谓词无窗口。zram 换出页同样跳过(不触发解压回填——目标后续访问行为
+不变)。需要冷页数据走显式 `MM_READ_FAULTIN` 变体,痕迹决策留给模块作者。
+
+附带红利:PTE dirty 位免费可读——`MmScan` 提供 dirty_only 模式(刚被壳写过/
+刚解密的区域天然高亮;CE VQE_DIRTYONLY 同源思想)。
+
+"原理上不可检测"的精确表述(RL-01/17 的理论根据):沙箱 app 的认知渠道只有
+自己的 syscall 界面与自己的内存语义;maps/fd/threads/SELinux audit/内存内容——
+no-fault 读取一条都不碰。**不可检测不是实现质量的结果,是原语语义的一部分。**
+mmap_lock 争用(毫秒级、高噪声、目标自 mmap 罕见)记为可忽略。
+
+### 6.5 ART 内定位:原 dex 而非加壳 dex(机制与知识分离)
+
+定位加壳 app 的原 dex:壳解密后必经 `DexFile::OpenMemory`,ART 在 ClassLinker 的
+`dex_caches_` 登记每个 DexFile(`begin_`/`size_`)——壳能抹 dex magic、能擦
+string_ids,**但不能抹 ART 自己要用的指针链**(否则 ART 无法懒解析类)。
+走链全程跨进程只读,目标进程零痕迹——壳的反 dump 检测盯的所有入口(frida、
+maps 读取、断点)我们都不经过。BlackDex/FART/Youpk 走同样的链但全部进程内运行
+(可被壳检测);本框架版本从内核走,这是差异化。
+
+**核心架构裁决(RL-18):机制进内核,知识进用户态。** 内核只提供通用原语
+(`LdrGetModuleHandle` / `LdrGetProcedureAddress` / `KeFollowPointerChain` /
+`MmCopyVirtualMemory`);ART 各版本结构偏移一个字节都不进内核——住在用户态
+**locator profile**(JSON:锚点策略 + 每跳偏移,按 Android 版本分发),
+新 Android = 更新 profile 数据,内核零重编。
+
+为什么 ART 是白盒有限集:活跃版本仅 7-8 个(Android 8-16);**Project Mainline 后
+libart.so 是 APEX 标准件**(Google 统一构建统一分发,OEM 改不了),源码公开——
+profile 生成器(tools/,Rust)一份吃全部版本,敌人只有时间,不是机型碎片。
+
+锚点方差(诚实):`Runtime::instance_`(`_ZN3art7Runtime9instance_E`)多数构建在
+.dynsym 可查,但 hidden-visibility + LTO 的构建会缺。兜底链:
+`JNI_GetCreatedJavaVMs`(JNI 规范强制导出)——不调用它,而是**有界扫它前几条
+指令**(adrp/add 引用静态实例的经典模式)反解 JavaVMExt 静态地址,再跳 Runtime。
+这就是 profile 里 anchor strategy 字段存在的意义:每版本选一条能用的路,内核只管执行。
+
+探测三层(v1 只做层 1 + 静态 profile;动态探测 v1.5,其价值是省 profile 维护):
+
+1. **结构不变量**(零偏移,永不失效):JavaVMExt 布局(vtable + Runtime*,
+   4.x 以来未变);DexFile `begin_`/`size_` 后跟 `location_` 指向合法路径字符串
+   (自校验锚——读出来不是合法路径 = 偏移错了)
+2. **有界指纹探测**(动态查找主体):"指针指向可识别对象"即指纹,每个判据自校验
+   ——错偏移只会探测失败,不会静默成功;失败候选立即跳过;首次毫秒级,不在热路径
+3. **静态 profile**(AOSP 源码算偏移,clang -fdump-record-layouts 级精度):
+   加速+兜底;层 2 探测成功自动回写缓存(同版本 ART 只探测一次)
+
+工程硬点:
+
+- **GC 移动**:链上若经过 mirror 堆对象(GcRoot 指向可移动 DexCache),中途 GC
+  会拿悬垂指针——**双走比对**(同链走两遍一致才采信;GC 移动是低频事件)+
+  每步大小/对齐/魔法校验,必须是 `KeFollowPointerChain` 内建语义,不指望模块自防
+- **壳的用后擦除**:链路终点是"ART 当前持有的 dex"不是"完整 dex"——擦伤部分由
+  Exuvia dexdoctor 兜底;且 Ps spawn 事件 + ART 就绪锚点可**抢在擦除前** dump,
+  擦除前后各一份,差集 = 壳擦了什么
+- **时机**:壳自己要跑 Java 就必须先把 ART 餐桌摆好——app 存活即 ART 就绪,
+  壳无法在时间上躲
+
+边界:此路**不通向** Java 方法 hook(拿到方法地址 ≠ 能 hook——改 entrypoint/
+写 .text 都是进程内代码修改,违反 RL-01)。它通向:无痕 dump、语义化定位
+(dex code_item 偏移 + begin_ = 目标进程绝对地址,给 MmScan/Read 当语义化锚点)、
+类/字段元数据读取、配合 Exuvia 组成完整脱壳栈(KeModify = Exuvia 承诺的
+ditPro KPM profile 的通用化实现,Exuvia repair 管线是下游)。微残余:内核读冷页
+会翻 pagemap 驻留位——present-only 默认已最小化(§6.4)。
+
+### 6.6 监听接口:脏位监工(2026-11-08 裁决,第一档)
+
+高频读写场景(游戏数值盯防/锁定)的正确形态:**循环本身进内核,模块零轮询**。
+
+```
+模块登记: MmWatch(pid, addr, len, [通知|自动改写条件Y→X])
+  → 模块干完退出(无常驻,RL-20)
+内核监工(定时,最快 1ms 周期):
+  每轮只查页表脏位(百纳秒级,不真读内存,不碰目标)
+  脏位没亮 → 值没变,什么都不做
+  脏位亮了 → 真读一次值,与上次比对:
+    确实变了 → (通知模式)入队,下次拉起模块时交给它;(自动改写模式)
+      命中条件(当前值==Y)→ 内核直接写 X(锁值),模块不在场也生效
+    → 清脏位,继续
+```
+
+- **为什么第一档**(:脏位骑墙):查脏位是内核查自己的账本,零接触目标;
+  脏位用户态不可读(app 的 soft-dirty 是另一套,互不干扰),清掉无人知晓;
+  20 个监听点一轮约 2μs。通知延迟最快 1ms(游戏一帧 16ms,余量两个数量级)。
+- **明确放弃第三档**(硬件断点):每线程只有 4 个监视寄存器,占用即暴露
+  (目标自己装断点会失败——反作弊专门探这个);实现复杂度爆炸。
+  拒绝理由入档。
+- **第二档**(写保护陷阱,精确到写入瞬间但侵入目标时间线)**v1 不做**,
+  API 预留精度字段;将来若做只允许登记在低频写入页(热页上写放大可测)。
+- 自动改写 = 监听条目的可选动作字段;"锁定"从每秒写 60 次变为只在游戏真改值时
+  写一次。
+- 配套保险(桌上件,待逐个裁决):按模块读写配额(防烧光隐蔽预算)、大扫描
+  慢速档、调度避让(模块与目标不同核)。批量读参数(一次调用拉 1MB)是
+  **第一天需求**而非优化项。
+
+### 6.7 通道定稿:句柄制(2026-11-08 二次裁决,取代 syscall+暗号设计)
+
+**演进史(勿回退)**:初版设计 = 私有 syscall 号 + 每次 128 位暗号验证 → owner 追问
+"必须要用调用号吗?" → 复核发现 KSU 2025-11 已完成同款演进(prctl 每次 magic 验证 →
+reboot syscall 一次性握手 + anon_inode fd,此后全走 ioctl,#2835)→ **定稿句柄制**。
+
+核心机制:
+
+```
+开机一次: kemodifyd(root)发起握手 syscall(带魔法数)
+  → 内核验证 uid==0 + 魔法数 → 分发框架句柄(anon fd,anon_inode:[kemodify])
+日常:     全部通信 = 对句柄的标准文件操作(read/write/ioctl/poll)
+  → 内核 fd 表即凭证:fd 不可猜(非数值密码,内核记账)、不可跨进程偷
+    (仅持有者可用)、进程死亡自动失效(close 回调撤销登记,零显式代码)
+分发模块句柄: 守护进程 fork 模块子进程(nobody),句柄经 SCM_RIGHTS
+  (Unix 域套接字的标准 fd 传递)递进子进程——绝不经 argv/环境变量
+```
+
+被 fd 语义整体消解的旧难题(对照记忆,勿恋战):暗号防猜(常数时间比较)、防偷
+(递送通道设计)、防复用(撤销时序)、批量读专用参数(read 天然流式)、事件通知
+专用通道(poll/select 天然等待)。旧设计的"128 位 token/标准输入握手包/透传失败
+响应"全部作废。
+
+三层检查(取代旧四层,RL-08):查句柄(fd→登记项,一次内核表查询)→ 能力位 →
+目标作用域。前两层烙印在句柄登记项里,查询即校验。
+
+选号降级:syscall 入口仅开机用一次。选号从"终生冻结的重大悬案"降级为"挑个不
+撞车的"(避开 169=KSU/45=KP;启动探测照旧——应答异常即拒绝启动,宁死不撞车)。
+生态占用调研(KSU-Next/susfs/魔改内核)从"拍板前置条件"降级为"发布前检查项"。
+
+诚实风险(首批真机必验):①严格 SELinux 策略下 nobody 进程对 fd 执行 ioctl 是否
+放行(预期放行——fd 操作的 SELinux 检查挂在 open 时,不在 ioctl;但必须实测);
+②fd 泄漏面:模块进程的 /proc/<pid>/fd 对同 uid 可见——nobody 互见无妨(拿到 fd
+数字≠拿到 fd;fd 不可跨进程按数字引用)。
+
 ---
 
 ## 7. Gateway 协议规范(通道层)
 
-- **通道形态**:冷门 syscall 号(具体取值定稿时写入 `docs/native-api.md` 并冻结),
-  参数携带帧:`{u16 proto_ver, u16 cmd, u128 token, ...}`。帧里显式带协议版本,
-  未来任何变更可被对端感知(RL-11)。
-- **鉴权顺序**(实现为不可重排的三步,RL-08):验 token → 验能力位 → 解析参数。
-- **特权侧入口**:daemon 经 ioctl(经 KP supercall 或宿主提供的等价机制)持有
-  管理通道——注册/撤销模块、查运行态。管理通道同样过 gateway 层,cmd 落 `Ob` 族。
+- **通道形态(句柄制定稿,RL-22/§6.7)**:开机一次 syscall 握手(带魔法数,
+  root 发起;nr 避开 169=KSU/45=KP,启动探测应答异常 = 拒绝启动)→ 框架句柄
+  (anon fd)→ 之后全部通信走 read/write/ioctl/poll,帧:`{u16 proto_ver, u16 cmd,
+  ...}`(帧里显式带协议版本,RL-11)。syscall 入口仅此一次,低频透传无时序面。
+- **守护进程通道(裁决)**:daemon 持框架句柄,管理命令(Ob 族)直接对句柄
+  ioctl——鉴权在握手时一次完成(uid==0),之后 fd 即身份。
+- **模块句柄(裁决)**:注册时内核铸造(烙印能力位+作用域),守护进程 fork 时经
+  SCM_RIGHTS 递进子进程;模块对句柄的每次操作过三层检查(RL-08)。
+- **事件通道(裁决)**:内核→守护进程**点对点**(守护进程是唯一受信订阅者,
+  内核不认识模块);守护进程→模块按生命周期模型(§4 数据流/RL-20/21)——
+  事件型拉起时事件写进标准输入;同模块节流(在跑不重复拉,事件排队)。
 - **能力位**:`uapi/capability.h` 定义(mem_read/mem_write/mem_search/syscall_shape/
   process_events …)。能力粒度到**原语族**,不做参数级能力(过度设计)。
 - **错误码约定**:`-EACCES` 模块越权;`-EPERM` 框架级拒绝(安全模式);`-EPROTO`
@@ -296,6 +645,13 @@ syscall 塑形: 目标进程调 openat/read/... → KP invoke_syscall 全局分�
 
 - **构建**:KPM 在 KernelPatch 检出环境内构建(镜像 `kpms/demo-hello/Makefile`),
   工具链 `aarch64-none-elf-`;产物 `kemodify.kpm`。daemon 用 NDK 静态构建。
+- **构建环境与分工(owner 裁决,2026-11-08)**:owner 开发机是 **Windows**——Linux
+  侧构建(KPM 交叉编译等)由协作 Agent 在 Linux 沙箱承担(`aarch64-none-elf-gcc` +
+  KP 检出环境即可;KP 自己的 CI 用 `ghcr.io/ylarod/ddk-min` 容器构建 DDK 产物,
+  KPM 构建更轻,无需 DDK)。daemon 是 Rust,可 **Windows 原生交叉编译**
+  (`cargo build --target aarch64-linux-android`);WebUI/Node 平台无关。日常迭代:
+  Rust 逻辑在 Windows 写测(单测可跑 Windows),KPM 改动才进 Linux——接触面很小。
+  仓库可选 `.devcontainer` 固化贡献者环境(参考 owner 的 ScreenshotFaker 实践)。
 - **CI 边界(诚实)**:CI 只能做协议一致性检查——UAPI 头与 `docs/native-api.md`
   的命令码/结构体/错误码三向同步校验(脚本比对),外加 daemon/模块模板的构建。
   **内核代码无法在 CI 验证**;每个触碰 kpm/ 的 PR 必须在 PR 描述里写明:
@@ -321,6 +677,17 @@ syscall 塑形: 目标进程调 openat/read/... → KP invoke_syscall 全局分�
 | 共享 uid 9000 的模块间隔离 | v1 已知弱项 | per-module uid 是 v2 演进位,协议已预留 |
 | KP 链配额(16/32 项) | 上游约束 | Zw 塑形层做配额管理,预留半数给其他 KPM 共存 |
 | kstorage 不做持久化 | 设计使然 | RL-09 的推论;daemon 侧磁盘注册表是唯一持久层 |
+| Prime+Probe L1 侧信道(规则表访问模式) | 残余对抗面 | 极先进攻击;v1 记录不处理(§6.3) |
+| pagemap 驻留位翻转(读冷页时) | 微残余 | present-only 默认已最小化(§6.4);FAULTIN 变体触碰冷页会暴露,文档化 |
+| PTE walk 版本矩阵(5.10→6.6 漂移) | 集中管理 | 只存在于 mm/ 模块(RL-16);RO 页写入 v1.5 再上 |
+| ART profile 年度维护 | 已知成本 | 新 Android 发布时从 AOSP tag 算偏移、发 profile v(N+1)(§6.5) |
+| gateway nr 与 KP supercall 冲突 | 已规避(句柄制下降级) | 45(truncate)被 KP 占用、169 被 KSU 占用;握手号另选(仅开机用一次);生态占用调研降级为发布前检查项 |
+| 严格 SELinux 下 nobody 对句柄 ioctl | 首批真机必验 | 预期放行(SELinux 检查挂在 open,不在 ioctl),但必须实测(§6.7 诚实风险①) |
+| 暗号在模块内存中是明文 | 已消解(句柄制) | 旧设计残余;句柄制下无暗号——fd 不可跨进程按数字引用,旧问题不存在 |
+| 代理网络需逐域名声明 | 设计使然 | 付费模块联网走守护进程代理(卡密场景验证过闭环);清单外域名拒发(RL-07a) |
+| 通知延迟最快 1ms(脏位监工) | 设计权衡 | 第一档精度;游戏一帧 16ms 余量充足。需精确到写入瞬间的场景留第二档(低频页,v1 不做)(§6.6) |
+| 高频读写的缓存污染 | 残余对抗面 | 大扫描的缓存搅动只能摊薄(慢速档)不能归零;盯防已由脏位监工消解为纯页表查询(§6.6) |
+| 桌上件(未逐个裁决) | 待办 | 读写配额/大扫描慢速档/调度避让/暗号定期轮换/模块崩溃重启策略——实现期逐个过(RL-20 节流已定) |
 
 ## 10. 术语表
 
@@ -335,6 +702,22 @@ syscall 塑形: 目标进程调 openat/read/... → KP invoke_syscall 全局分�
 | 能力位(Capability bits) | 模块注册时声明的原语族授权集 |
 | 宿主(Host) | 加载 KPM 的方案:APatch / SukiSU-Ultra / 裸 KernelPatch |
 | 元模块清单 | `manifest.toml`(刻意避开 module.prop 命名,RL-13) |
+| 内存蜜罐 | app 故意保留未触碰页(mmap 后不写),用非特权 mincore 轮询驻留变化以检测读内存行为 |
+| present-only | 逐页 `pte_present` 原子谓词:只读驻留页,绝不触发缺页分配(观测纯度构造保证;CE "Active memory only" 同源思想) |
+| dirty_only | MmScan 模式:利用 PTE dirty 位筛选刚被写过的页(找壳刚解密区域;CE VQE_DIRTYONLY 同源) |
+| locator profile | 用户态 ART 结构偏移数据(锚点策略 + 每跳偏移,JSON),按 Android 版本分发;永不进内核(RL-18) |
+| 双走比对 | 同链走两遍结果一致才采信——KeFollowPointerChain 内建的 GC 移动防御 |
+| ART 就绪锚点 | 目标进程 ART 结构可用的判定(如 JNI_GetCreatedJavaVMs 布局有效);壳要跑 Java 就必须先就绪 |
+| Ldr 族 | 跨进程模块基址 / .dynsym 符号解析原语(Windows 加载器分类学):LdrGetModuleHandle / LdrGetProcedureAddress |
+| 时序防御模型 | Zw 层 R1-R6 规则集(§6.3):快速失败/成本封顶/紧方差警戒/伪造垫底/路径建模/透传真行为 |
+| 无常驻模型 | 模块平时不存在,事件拉起、干完就退(RL-20);持续监控由内核监听规则承担 |
+| 先礼后兵 | 目标进程退出的联动收尾:逐个告知目标死亡 → 全死发收工通知(礼)→ 宽限(默认3s,用户可调)→ 强杀(兵)(RL-21) |
+| 脏位监工 | 监听接口第一档:定时只查页表脏位(零接触目标),亮了才真读比对;配自动改写条件(§6.6) |
+| 透传 | (句柄制下仅存于握手号)非暗号/非握手的 syscall 流量原样转真 handler,与原厂行为一致——入口号探测无差异 |
+| 句柄制 | 通道形态:开机一次 syscall 握手 → anon fd;此后全部通信走标准文件接口。fd 即凭证——不可猜/不可偷/死亡即失效(RL-08/22,§6.7;先例 KSU 2025-11) |
+| 句柄(fd) | 框架分发的匿名文件描述符,fd 表项烙印属主/能力位/作用域;模块句柄经 SCM_RIGHTS 从守护进程递进子进程 |
+| 作用域 | 模块被授权操作的目标 app 清单(用户勾选,含 system_server/android;照抄 LSPosed 交互);内核逐命令强制(RL-04a) |
+| 守护进程代理 | 模块旁路能力(联网等)经 kemodifyd 代办:清单声明域名、安装亮给用户、统一记账(RL-07a) |
 
 ## 11. 给接手 Agent 的行为准则
 
@@ -352,6 +735,21 @@ syscall 塑形: 目标进程调 openat/read/... → KP invoke_syscall 全局分�
    PR 描述里的测试记录按 §8 判据序列逐项填写。
 7. **交付给下一个 Agent 时**:更新本文档的"当前状态"(§0),像 handoff 一样诚实记录
    做了什么、什么没做完、为什么。
+8. **语言矩阵是裁决不是偏好**:KPM=C(KP 工具链锁死,freestanding 无 libstdc++,
+   Rust no_std 重实现 KPM ABI = 纯负担);daemon=Rust(ksud 先例 + bindgen 消费
+   uapi 单一事实源);WebUI=TypeScript(克制,vanilla/Preact);拒绝 Go/Kotlin/JVM
+   (root 守护进程拖 ART 运行时)。勿引入第四种核心语言。
+9. **构建分工**:Linux 侧构建由你在沙箱承担(owner 开发机 Windows);daemon 的
+   Rust 改动可建议 owner 在 Windows 原生交叉编译自测;KPM 产物由你构建并附
+   校验和。约定见 §8。
+10. **模板与 uapi 的许可证陷阱**:module-template 双模板文件头单独 Apache-2.0
+    (RL-15)——模板带 GPL 头 = 闭源模块作者复制模板第一步即被传染;新增模板
+    文件时逐文件检查 SPDX 行。
+11. **商讨纪律(2026-11-08 教训入档)**:owner 的话分"裁决"与"思考/商量"两种,
+    **默认是后者**——不得把商讨中的话自动升格为定案,不得用"定了/定稿/清空清单"
+    等词汇催促收敛;每轮结尾明确标注哪些是新裁决、哪些仍在桌上;重大决定
+    (如选号)即使 Agent 认为证据充分,**拍板权永久在 owner**。急着完成
+    ≠ 帮 owner。
 
 ---
 

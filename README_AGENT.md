@@ -39,7 +39,7 @@
 
 ## 1. 项目本质(30 秒版)
 
-**KeModify = Android ARM64 内核级修改框架。单个 KPM(`kemodify.kpm`)对外暴露窄原语集(跨进程内存读写/搜索、syscall 结果塑形、进程事件),通道 = **文件描述符句柄制**(开机一次 syscall 握手后,内核分发匿名 fd;此后所有通信走标准内核文件接口,句柄本身即凭证,逐句柄烙印能力位+作用域);调用方是以 nobody 身份运行的用户态二进制模块;root 守护进程 `kemodifyd` 管理模块生命周期并代理特权操作。设计目标:目标进程内零代码驻留——只有被明确修改的数据不同。**
+**KePosed = Android ARM64 内核级修改框架。单个 KPM(`keposed.kpm`)对外暴露窄原语集(跨进程内存读写/搜索、syscall 结果塑形、进程事件),通道 = **文件描述符句柄制**(开机一次 syscall 握手后,内核分发匿名 fd;此后所有通信走标准内核文件接口,句柄本身即凭证,逐句柄烙印能力位+作用域);调用方是以 nobody 身份运行的用户态二进制模块;root 守护进程 `keposedd` 管理模块生命周期并代理特权操作。设计目标:目标进程内零代码驻留——只有被明确修改的数据不同。**
 
 核心事实:
 
@@ -61,9 +61,14 @@
 | ART 定位(裁决) | 机制(Ldr/Ke 走链)进内核,ART 版本偏移进用户态 locator profile,永不进内核(RL-18) |
 | bug = 砖/开机循环 | KPM 没有用户态容错边界;`KPM_EXIT` 清理路径与 `KPM_INIT` 同等重要 |
 
-**名字语义(勿漂移)**:致敬 Windows 内核执行例程族(`Ke*`)。`KeStackAttachProcess`——
-附体进程、操纵内存、抽离、不留一物——正是本框架在 Android 上所做的事。
-API 分类学因此借用 Windows 内核命名法(§5),这是刻意的身份认同,不是 cosplay 随笔。
+**名字语义(勿漂移;2026-11-09 随更名 KePosed 更新)**:双词根——`Ke` 致敬 Windows
+内核执行例程族(`KeStackAttachProcess`:附体进程、操纵内存、抽离、不留一物——本框架
+在 Android 上所做的事);`Posed` 承认 Xposed 哲学血统(方法级 hook、作用域授权)。
+API 分类学因此沿用 Windows 内核命名法(§5),这是刻意的身份认同,不是 cosplay 随笔。
+**澄清(防误读)**:KePosed 不运行 Xposed 模块——哲学同源、ABI 不同(模块是 nobody
+原生二进制 + 版本化 UAPI,零 Java API);与 LSPosed 是同一目标的不同方法(§1 互补
+口径),不是替代者。更名记录:原名 KeModify → KePosed(2026-11-09,发布前更名,
+无迁移成本;GitHub 仓库名由 owner 同步更改)。
 
 ---
 
@@ -154,7 +159,7 @@ API 分类学因此借用 Windows 内核命名法(§5),这是刻意的身份认�
 
 - **RL-11** 命令码**永不重编号**。分配区间:`0x1000+` Ke、`0x2000+` Mm、`0x3000+` Ps、
   `0x4000+` Zw、`0x5000+` Ob、`0x6000+` Ldr。废弃的码保留取值并返回 `-EOPNOTSUPP`;新增只追加。
-  任何 struct 布局变更必须升 `KEMODIFY_PROTO_VERSION`(gateway 对不匹配返回 `-EPROTO`)。
+  任何 struct 布局变更必须升 `KEPOSED_PROTO_VERSION`(gateway 对不匹配返回 `-EPROTO`)。
   `[无 SDK 保护的生态里,ABI 破坏 = 所有第三方模块同时死亡;协议文档与 UAPI 头文件必须同 commit 变更]`
 
 - **RL-12** 所有 UAPI 结构体:定宽类型(`u32/u64`)、显式 `__attribute__((packed))`(布局敏感处)、
@@ -165,7 +170,7 @@ API 分类学因此借用 Windows 内核命名法(§5),这是刻意的身份认�
 ### E. 生态隔离纪律(防污染是双向的)
 
 - **RL-13** 框架模块的清单文件**必须**叫 `manifest.toml`,**绝不**叫 `module.prop`;
-  模块目录**必须**在 `/data/adb/modules/kemodify/modules/` 之下。
+  模块目录**必须**在 `/data/adb/modules/keposed/modules/` 之下。
   `[叫 module.prop = KSU/LSPosed manager 把我们的模块误认成自己的模块 = 双向污染;嵌套目录对 KSU 顶层扫描不可见,卸载框架 = 连带清空]`
 
 - **RL-14** 框架**绝不**依赖任何宿主私有接口:SukiSU 的 extension ioctl、APatch 的管理器
@@ -288,7 +293,7 @@ API 分类学因此借用 Windows 内核命名法(§5),这是刻意的身份认�
 ## 4. 架构地图(目标状态)
 
 ```
-kemodify/
+keposed/
 ├── README.md / README_ZH.md / README_AGENT.md   # 本三件套
 ├── LICENSE                                       # GPL-3.0
 ├── kpm/                        # 内核态:C,KernelPatch Module
@@ -300,30 +305,30 @@ kemodify/
 │   ├── ps/                     # 进程定位、spawn/exit 事件通知
 │   ├── zw/                     # syscall 塑形(构建于 hook_syscalln 之上)
 │   ├── ob/                     # 模块注册表:token、能力集、撤销
-│   └── include/kemodify/       # 内核内部头
-├── daemon/                     # kemodifyd(Rust;root 运行;bindgen 消费 uapi/ 头——协议定义单一事实源)
+│   └── include/keposed/       # 内核内部头
+├── daemon/                     # keposedd(Rust;root 运行;bindgen 消费 uapi/ 头——协议定义单一事实源)
 │   ├── install/                # 模块 zip 校验、解包、内核注册
 │   ├── spawn/                  # fork → drop uid → exec 模块二进制(RL-07 流程)
 │   ├── registry/               # 磁盘注册表(非密信息;重启重放用,RL-09)
 │   └── webui/                  # localhost HTTP(静态 webroot + REST);TS,vanilla/Preact,KSU WebView 打开
 ├── uapi/                       # Native API 头文件(双许可,稳定 ABI,RL-12)
-│   ├── kemodify.h              # 命令码、结构体布局、协议版本(C 头=单一事实源,Rust 侧 bindgen 消费)
+│   ├── keposed.h              # 命令码、结构体布局、协议版本(C 头=单一事实源,Rust 侧 bindgen 消费)
 │   └── capability.h            # 能力位定义
 ├── module-template/            # 全原语演示模块 = 集成测试载体
 │   ├── template-c/             # C 模板:裸 ABI 示范,零依赖——单独 Apache-2.0(RL-15)
 │   └── template-rust/          # Rust 模板:安全绑定示范——单独 Apache-2.0(RL-15)
 ├── tools/                      # Rust 工具链(ART profile 生成器:从 AOSP 源码算各版本偏移)
 ├── docs/
-│   └── native-api.md           # KeModify Native API Reference(协议规范)
+│   └── native-api.md           # KePosed Native API Reference(协议规范)
 └── (KSU 模块包装:service.sh、customize.sh、metainfo——随发布打包)
 ```
 
 关键数据流(一屏版):
 
 ```
-开机: 宿主加载器加载 kemodify.kpm → KPM_INIT(gateway 自挂、启动探测(号被占则拒绝启动)、
-  能力表初始化) → KSU service.sh 拉起 kemodifyd
-  → kemodifyd 一次性 syscall 握手(带魔法数,root) → 内核分发框架句柄(anon fd)
+开机: 宿主加载器加载 keposed.kpm → KPM_INIT(gateway 自挂、启动探测(号被占则拒绝启动)、
+  能力表初始化) → KSU service.sh 拉起 keposedd
+  → keposedd 一次性 syscall 握手(带魔法数,root) → 内核分发框架句柄(anon fd)
   → 从磁盘注册表重放模块注册(内核为每模块铸新句柄,烙印能力位+作用域)
   ——注意:此时不 spawn 任何模块(无常驻,RL-20)
 
@@ -343,7 +348,7 @@ kemodify/
   → 例程经 access_process_vm / hook_syscalln 作用于目标进程
 
 syscall 塑形: 目标进程调 openat/read/... → KP invoke_syscall 全局分发
-  → Kemodify Zw 层 before/after 回调(受 RL-03 约束)→ 结果塑形 → 返回目标
+  → KePosed Zw 层 before/after 回调(受 RL-03 约束)→ 结果塑形 → 返回目标
 
 ART 定位(原语组合示例,§6.5): Ps spawn 事件 → ART 就绪锚点探测
   → LdrGetModuleHandle(pid,"libart.so") → LdrGetProcedureAddress(锚点符号)
@@ -360,7 +365,7 @@ ART 定位(原语组合示例,§6.5): Ps spawn 事件 → ART 就绪锚点探测
 分类学整体移植 Windows 内核例程族——这不是装饰,是协议文档的章节结构、命令码的分配
 依据、以及生态的命名词汇表。**前缀语义必须用对**(全塞进 Ke 族 = 一眼穿帮的 cosplay):
 
-| 族 | Windows 语义 | KeModify 对应 | 命令码区间 |
+| 族 | Windows 语义 | KePosed 对应 | 命令码区间 |
 |---|---|---|---|
 | `Ke` | 内核执行层核心 | attach/detach、链式指针读取(KeFollowPointerChain,双走比对内建)、通道管理 | `0x1000+` |
 | `Mm` | 内存管理 | 跨进程读/写/特征码搜索(present-only 默认)、dirty_only 扫描、页属性操作、**监听 API(MmWatch:脏位监工 + 可选自动改写,§6.6)** | `0x2000+` |
@@ -372,7 +377,7 @@ ART 定位(原语组合示例,§6.5): Ps spawn 事件 → ART 就绪锚点探测
 
 命名映射示例(第三列是 Windows 真实 API,语义吻合是选择它的原因):
 
-| KeModify 例程 | Windows 原型 | 语义 |
+| KePosed 例程 | Windows 原型 | 语义 |
 |---|---|---|
 | `KeAttachProcess(pid)` | `KeStackAttachProcess` | 附体目标进程地址空间 |
 | `KeDetachProcess()` | `KeUnstackDetachProcess` | 脱离 |
@@ -387,7 +392,7 @@ ART 定位(原语组合示例,§6.5): Ps spawn 事件 → ART 就绪锚点探测
 | `MmWatch(pid, addr, len, action)` | —(Mm 族自造) | 登记监听:值变化通知/自动改写(§6.6) |
 | `ObProxyRequest(url, ...)`(暂名) | —(Ob 族自造) | 守护进程代理网络请求(RL-07a;命名待协议文档定稿) |
 
-协议文档《KeModify Native API Reference》按族分章;Nt/Zw 二象性可作协议彩蛋
+协议文档《KePosed Native API Reference》按族分章;Nt/Zw 二象性可作协议彩蛋
 (模块侧调用约定 = Nt 视角,内核侧处理 = Zw 视角),不作为功能面。
 
 ---
@@ -400,7 +405,7 @@ ART 定位(原语组合示例,§6.5): Ps spawn 事件 → ART 就绪锚点探测
 
 ### 6.1 KP 运行时事实
 
-- **生命周期宏**:`KPM_NAME("kemodify")`(全内核唯一,控制/卸载的标识符)、
+- **生命周期宏**:`KPM_NAME("keposed")`(全内核唯一,控制/卸载的标识符)、
   `KPM_VERSION/LICENSE/AUTHOR/DESCRIPTION`、`KPM_INIT(fn)`、`KPM_CTL0(fn)`(用户态
   控制消息)、`KPM_EXIT(fn)`。init 返回非 0 = 加载失败。
 - **syscall hook**:用 `hook_syscalln(nr, narg, before, after, udata)`——自动策略,
@@ -444,7 +449,7 @@ ART 定位(原语组合示例,§6.5): Ps spawn 事件 → ART 就绪锚点探测
 - **热路径纪律**:syscall hook 的 before/after 是热路径——RL-03/RL-04 的来源。
 
 已知边界(上游文档明示):hook 框架 ARM64-only;fp 链上限 32 项;
-`HOOK_CHAIN_FULL`(16 项满)是真实错误码,KeModify 自身的 Zw 塑形层要做配额管理,
+`HOOK_CHAIN_FULL`(16 项满)是真实错误码,KePosed 自身的 Zw 塑形层要做配额管理,
 不能把 KP 的链配额吃光。
 
 ### 6.2 符号定位金字塔(原语 ↔ 定位链对照)
@@ -512,7 +517,7 @@ v1 如实标注。
 (mmap 后从未触碰 = 不在 working set)天然被排除。CE 另有 VQE_PAGEDONLY /
 VQE_DIRTYONLY 变体。
 
-KeModify 把它升级为**构造保证而非使用纪律**(RL-17):Mm 读取/搜索默认逐页
+KePosed 把它升级为**构造保证而非使用纪律**(RL-17):Mm 读取/搜索默认逐页
 `pte_present` 原子谓词(内核页表 walk,只读)——present 才读,不 present 跳过,
 **绝不替目标分配页**。与 CE 的差异:CE 用户态"先查后读"有 TOCTOU 窗口,
 内核逐页谓词无窗口。zram 换出页同样跳过(不触发解压回填——目标后续访问行为
@@ -576,7 +581,7 @@ profile 生成器(tools/,Rust)一份吃全部版本,敌人只有时间,不是机
 code_item 偏移 + begin_ = 目标进程绝对地址,正是 §6.8 哨兵登记的输入
 (方法地址从来不是问题,执行体放哪才是——已由影子页解决)。其余产物不变:
 无痕 dump、语义化锚点(给 MmScan/Read)、类/字段元数据读取、配合 Exuvia
-组成完整脱壳栈(KeModify = Exuvia 承诺的 ditPro KPM profile 的通用化实现,
+组成完整脱壳栈(KePosed = Exuvia 承诺的 ditPro KPM profile 的通用化实现,
 Exuvia repair 管线是下游)。微残余:内核读冷页会翻 pagemap 驻留位——
 present-only 默认已最小化(§6.4)。
 
@@ -619,8 +624,8 @@ reboot syscall 一次性握手 + anon_inode fd,此后全走 ioctl,#2835)→ **�
 核心机制:
 
 ```
-开机一次: kemodifyd(root)发起握手 syscall(带魔法数)
-  → 内核验证 uid==0 + 魔法数 → 分发框架句柄(anon fd,anon_inode:[kemodify])
+开机一次: keposedd(root)发起握手 syscall(带魔法数)
+  → 内核验证 uid==0 + 魔法数 → 分发框架句柄(anon fd,anon_inode:[keposed])
 日常:     全部通信 = 对句柄的标准文件操作(read/write/ioctl/poll)
   → 内核 fd 表即凭证:fd 不可猜(非数值密码,内核记账)、不可跨进程偷
     (仅持有者可用)、进程死亡自动失效(close 回调撤销登记,零显式代码)
@@ -784,7 +789,7 @@ inline-hook 库:改字节/驻留跳板/自哈希必炸——加固与反作弊�
 ## 8. 验证协议
 
 - **构建**:KPM 在 KernelPatch 检出环境内构建(镜像 `kpms/demo-hello/Makefile`),
-  工具链 `aarch64-none-elf-`;产物 `kemodify.kpm`。daemon 用 NDK 静态构建。
+  工具链 `aarch64-none-elf-`;产物 `keposed.kpm`。daemon 用 NDK 静态构建。
 - **构建环境与分工(owner 裁决,2026-11-08)**:owner 开发机是 **Windows**——Linux
   侧构建(KPM 交叉编译等)由协作 Agent 在 Linux 沙箱承担(`aarch64-none-elf-gcc` +
   KP 检出环境即可;KP 自己的 CI 用 `ghcr.io/ylarod/ddk-min` 容器构建 DDK 产物,
@@ -797,7 +802,7 @@ inline-hook 库:改字节/驻留跳板/自哈希必炸——加固与反作弊�
   **内核代码无法在 CI 验证**;每个触碰 kpm/ 的 PR 必须在 PR 描述里写明:
   测试设备、内核版本、加载器及版本、KPM_EXIT 后设备是否存活。
 - **真机判据序列**(每次 kpm/ 改动后全过,人类执行):
-  1. 加载:dmesg 横幅版本号与源码 `KEMODIFY_BUILD_TAG` 一致(防旧二进制上机);
+  1. 加载:dmesg 横幅版本号与源码 `KEPOSED_BUILD_TAG` 一致(防旧二进制上机);
   2. gateway:module-template 全原语跑通(attach→read→search→write→detach,
      每步校验读回一致);
   3. 塑形:Zw 层安装 openat 塑形 → 目标进程读路径拿到塑形结果 → 卸载后恢复原生;
@@ -845,8 +850,8 @@ inline-hook 库:改字节/驻留跳板/自哈希必炸——加固与反作弊�
 | 术语 | 含义 |
 |---|---|
 | KPM | KernelPatch Module;ELF 格式内核模块,由 KP 运行时加载执行 |
-| Gateway | kemodify.kpm 内的私有 syscall 通道 + 鉴权 + 分发层 |
-| 模块(Module) | 扩展 KeModify 的非特权用户态二进制 |
+| Gateway | keposed.kpm 内的私有 syscall 通道 + 鉴权 + 分发层 |
+| 模块(Module) | 扩展 KePosed 的非特权用户态二进制 |
 | Token | 内核铸造的 128 位模块凭据;一次性、常数时间比较、卸载即失效 |
 | 塑形(Shaping) | 修改目标进程看到的 syscall 结果(返回值/出参缓冲) |
 | 附体(Attach) | 内核侧进入目标进程地址上下文执行原语(致敬 KeStackAttachProcess) |
@@ -878,7 +883,7 @@ inline-hook 库:改字节/驻留跳板/自哈希必炸——加固与反作弊�
 | 两种运输 | 同一套命令分发的两个入口:模块进程走 ioctl(句柄),跳板内走 UDF 陷阱(凭证=执行位置归属模块 X) |
 | PASS/FABRICATE/SKIP | 跳板函数返回语义:放行 / 原方法照跑改返回值 / 跳过原方法直接替答 |
 | 作用域 | 模块被授权操作的目标 app 清单(用户勾选,含 system_server/android;照抄 LSPosed 交互);内核逐命令强制(RL-04a) |
-| 守护进程代理 | 模块旁路能力(联网等)经 kemodifyd 代办:清单声明域名、安装亮给用户、统一记账(RL-07a) |
+| 守护进程代理 | 模块旁路能力(联网等)经 keposedd 代办:清单声明域名、安装亮给用户、统一记账(RL-07a) |
 
 ## 11. 给接手 Agent 的行为准则
 

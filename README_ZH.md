@@ -1,21 +1,21 @@
-# KeModify
+# KePosed
 
 简体中文 | [English](README.md) | [AI 协作文档](README_AGENT.md)
 
 ## 📖 介绍
 
-**KeModify** 是一个 Android(ARM64)内核级修改框架。
+**KePosed** 是一个 Android(ARM64)内核级修改框架。
 
-它在**纯内核态**提供跨进程内存读写与系统调用结果塑形。目标进程内没有注入的代码、没有多余的映射、没有常驻库。**扫不到任何东西,因为那里真的什么都没有。**
+它在**纯内核态**提供跨进程内存读写、系统调用结果塑形与**零注入方法级 hook**(影子页双视图:原字节永不变、零驻留代码)。目标进程内没有常驻代码、没有多余的映射、没有常驻库。**扫不到任何东西,因为那里真的什么都没有。**
 
-名字致敬 Windows 内核执行例程族(`Ke*`):`KeStackAttachProcess`——附体进程、操纵内存、抽离、不留一物——正是本框架在 Android 上所做的事。
+名字连接两个血统:`Ke` = Windows 内核执行例程族(`KeStackAttachProcess`——附体进程、操纵内存、抽离、不留一物);`Posed` = Xposed 哲学(方法级 hook、作用域授权)。与 Xposed 家族目标相同、方法不同。**KePosed 不运行 Xposed 模块**——模块是对接版本化内核 UAPI 的原生二进制,不是 Java 桥模块;是哲学血统,不是 API 血统。
 
-用户态 hook 框架(Xposed 系)必须把可执行代码放进目标进程。无论怎么隐藏——抹 magic、伪装 classloader、混淆 maps——载荷*存在于内存中*,而内存可以被扫描。这是一场隐藏方注定落后的拉锯战。KeModify 的解法是不进入这个战场:
+用户态 hook 框架(Xposed 系)必须把可执行代码放进目标进程。无论怎么隐藏——抹 magic、伪装 classloader、混淆 maps——载荷*存在于内存中*,而内存可以被扫描。这是一场隐藏方注定落后的拉锯战。KePosed 的解法是不进入这个战场:
 
-| | 用户态 hook 框架 | KeModify |
+| | 用户态 hook 框架 | KePosed |
 |---|---|---|
 | 载荷位置 | 目标进程内 | 仅内核态 |
-| 可检测痕迹 | dex/ELF、classloader、entrypoint hook、匿名可执行页 | **无** ——目标内存除了你明确修改的数据外分毫未动 |
+| 可检测痕迹 | dex/ELF、classloader、entrypoint hook、匿名可执行页 | **零驻留** ——原字节永不改动(哈希校验照常通过);除你明确修改的数据外分毫未动 |
 | 检测成本 | 内存扫描(便宜,且越来越便宜) | 需要内核自省(沙箱内 app 做不到) |
 
 > **使用 AI 助手(Copilot / Claude / GPT 等)参与本项目的开发?** 请先阅读 [README_AGENT.md](README_AGENT.md)——它专为 AI 编写,包含本项目**不可协商的设计决策、内核上下文红线与 Native API 分类学**。跳过它直接改代码极可能产出开机循环级缺陷。
@@ -28,17 +28,17 @@
 - **内核只做执行,决策逻辑在用户态(eBPF 哲学)**
   内核侧只暴露窄的、可审计的原语——没有脚本引擎、没有规则解释器、没有业务逻辑。决策逻辑住在非特权用户态模块里。模块崩溃只死自己的进程——永远不伤内核,永远不伤目标。
 
-- **非特权二进制模块 + 能力 token**
-  模块是以**非 root uid** 运行的静态链接二进制——正如 Xposed 模块是无特权的 app。每个特权动作都必须表达为经 token 鉴权通道的 KeModify 原语调用;内核逐模块强制执行其注册的能力集(mem_read / mem_write / mem_search / syscall_shape …)。模块 literally 没有任何一条不通守门人的提权路径。
+- **非特权二进制模块 + 能力句柄**
+  模块是以**非 root uid** 运行的静态链接二进制——正如 Xposed 模块是无特权的 app。每个特权动作都必须表达为经内核签发句柄(fd)的 KePosed 原语调用;内核逐模块强制执行其注册的能力集(mem_read / mem_write / mem_search / syscall_shape …)。模块 literally 没有任何一条不通守门人的提权路径。
 
 - **Windows 内核分类学的 Native API**
-  内核↔模块协议借鉴 Windows 内核例程分类法,按前缀族组织:`Ke`(执行)、`Mm`(内存)、`Ps`(进程)、`Zw`(syscall 塑形)、`Ob`(模块注册)。**不提供 SDK——只有头文件和协议文档。** ABI 是稳定的、带版本的 syscall 契约;模块可以闭源,因为接口是唯一的接触面。
+  内核↔模块协议借鉴 Windows 内核例程分类法,按前缀族组织:`Ke`(执行)、`Mm`(内存)、`Ps`(进程)、`Zw`(syscall 塑形)、`Ob`(模块注册)。**不提供 SDK——只有头文件和协议文档。** ABI 是稳定的、带版本的契约(内核签发句柄上的 ioctl);模块可以闭源,因为接口是唯一的接触面。
 
 - **加载器无关**
-  `kemodify.kpm` 是标准 KernelPatch Module,兼容任何合规加载器——[APatch](https://github.com/bmax121/APatch)(原生 KPM 支持)、[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra)(KPM 桥接)、裸 [KernelPatch](https://github.com/bmax121/KernelPatch)(`sc_kpm_load` / 嵌入 boot 镜像)。加载是加载器的事,不是框架的事;框架永不依赖任何管理器 app。
+  `keposed.kpm` 是标准 KernelPatch Module,兼容任何合规加载器——[APatch](https://github.com/bmax121/APatch)(原生 KPM 支持)、[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra)(KPM 桥接)、裸 [KernelPatch](https://github.com/bmax121/KernelPatch)(`sc_kpm_load` / 嵌入 boot 镜像)。加载是加载器的事,不是框架的事;框架永不依赖任何管理器 app。
 
-- **与 LSPosed 正交共存——攻击面不相交**
-  方法级进程内 hook 仍是 LSPosed 的领域;KeModify 拥有进程外的 syscall 塑形与数据级内存操纵。两者可在同一设备并行不冲突。用户态部分以 KernelSU 模块形式分发,模块目录刻意做了命名空间隔离(`manifest.toml`,不叫 `module.prop`)——任何 manager 都不会误识别对方的模块。
+- **与 LSPosed 互补——同一目标的不同方法**
+  LSPosed 走进程内(生态兼容、模块生态最大);KePosed 走进程外内核态(零足迹、检测免疫)。方法级 hook 两条路都有——他们是驻留式,我们是零注入影子页式。两者可在同一设备并行不冲突。用户态部分以 KernelSU 模块形式分发,模块目录刻意做了命名空间隔离(`manifest.toml`,不叫 `module.prop`)——任何 manager 都不会误识别对方的模块。
 
 ## 📐 架构
 
@@ -46,21 +46,21 @@
 ┌───────────────────────────────────────────────────────────┐
 │  用户态                                                    │
 │                                                            │
-│  kemodifyd (root 守护进程)    WebUI        模块二进制       │
+│  keposedd (root 守护进程)    WebUI        模块二进制        │
 │  模块生命周期、配置、         (HTTP)      非特权、         │
 │  特权代理                                  任意许可证      │
 └──────────────┬─────────────────────────────▲───────────────┘
-               │ ioctl (特权)                │ 私有 syscall 通道
-               │                             │ (token 鉴权)
+               │ ioctl (特权)                │ 句柄通道(fd 上的 ioctl)
+               │                             │ (fd 经 SCM_RIGHTS 递进)
 ┌──────────────▼─────────────────────────────┴───────────────┐
-│  内核态 — kemodify.kpm (KernelPatch Module)                │
+│  内核态 — keposed.kpm (KernelPatch Module)                 │
 │                                                            │
-│  Gateway      token 鉴权、逐模块能力强制                    │
+│  Gateway      句柄鉴权、逐模块能力强制                      │
 │  Ke 例程      attach / detach、执行层原语                   │
 │  Mm 例程      跨进程读 / 写 / 特征码搜索                    │
 │  Ps 例程      进程定位、spawn/exit 事件通知                 │
 │  Zw 例程      系统调用结果塑形                              │
-│  Ob 例程      模块注册表:token、能力、撤销                 │
+│  Ob 例程      模块注册表:句柄、能力、撤销                  │
 └──────────────┬─────────────────────────────────────────────┘
                │ access_process_vm / hook_syscalln
 ┌──────────────▼─────────────────────────────────────────────┐
@@ -71,7 +71,7 @@
 
 ## 🧩 模块系统
 
-模块是 zip 包,安装于 `/data/adb/modules/kemodify/modules/<module-id>/`——嵌套在框架自身的 KSU 模块目录之下,对 KSU 顶层扫描不可见,随框架一起卸载。清单文件是 `manifest.toml`(刻意**不叫** `module.prop`),KSU/LSPosed manager 永远不会误识别框架模块。
+模块是 zip 包,安装于 `/data/adb/modules/keposed/modules/<module-id>/`——嵌套在框架自身的 KSU 模块目录之下,对 KSU 顶层扫描不可见,随框架一起卸载。清单文件是 `manifest.toml`(刻意**不叫** `module.prop`),KSU/LSPosed manager 永远不会误识别框架模块。
 
 ```toml
 id = "example"
@@ -85,11 +85,11 @@ mem_write = true
 syscall_shape = false
 ```
 
-安装时守护进程向内核注册模块(内核铸造 128 位 token),随后把 `bin/<module-id>` 降到非特权 uid 拉起,token 经 argv 传递。每条 gateway 命令在**任何参数解析之前**先校验该模块的能力集;越权返回 `-EACCES`。卸载即撤销 token 并杀进程——凭据即时死亡。
+安装时守护进程向内核注册模块(内核铸造逐模块句柄——一个匿名 fd),随后把 `bin/<module-id>` 降到非特权 uid 拉起,句柄经 SCM_RIGHTS fd 传递递进。每条 gateway 命令在**任何参数解析之前**先校验该模块的能力集;越权返回 `-EACCES`。卸载即撤销句柄并杀进程——凭据即时死亡。
 
 ## 📡 Native API
 
-完整协议参考:[docs/native-api.md](docs/native-api.md)(*KeModify Native API Reference*)。
+完整协议参考:[docs/native-api.md](docs/native-api.md)(*KePosed Native API Reference*)。
 
 | 族 | 用途 | 代表例程 |
 |---|---|---|
@@ -101,10 +101,10 @@ syscall_shape = false
 
 ## ⚠️ 诚实的能力边界
 
-KeModify **不是**万能的 Xposed 替代品。能与不能,如实陈述:
+KePosed **不是**万能的 Xposed 替代品。能与不能,如实陈述:
 
 - ✅ **干净(零痕迹)** —— 系统调用结果塑形(路径隐藏、环境伪装)与数据级内存补丁(数值、字段、属性区)。代码永远不进目标进程。
-- ⚠️ **不在范围** —— 方法级逻辑 hook(改参数、改返回值、调用链拦截)需要进程内执行,与核心设计矛盾。这类需求请用 LSPosed;两框架共存。
+- ✅ **方法级 hook(v1,零注入形态)** —— 影子页双视图:原页字节永不改动(读/哈希校验恒见原样),hook 逻辑只存在于执行瞬间的临时视图或内核静态规则。覆盖 AOT/JIT/native 目标;纯解释执行与被内联方法是文档化残余缺口(README_AGENT.md §6.8)。LSPosed 是互补路径——同一目标的不同方法。
 - 🛡️ **残余对抗面** —— 目标可以哈希*自己的数据*来发现数据补丁;但校验逻辑读取的输入本身可以在 syscall 层被塑形。纵深防御站在内核侧。硬件级自省(JTAG、hypervisor 级 DMA 扫描)明确不在范围内。
 
 ## 📊 项目状态

@@ -1,21 +1,21 @@
-# KeModify
+# KePosed
 
 [简体中文](README_ZH.md) | English | [AI collaboration doc](README_AGENT.md)
 
 ## 📖 Introduction
 
-**KeModify** is a kernel-level modification framework for Android (ARM64).
+**KePosed** is a kernel-level modification framework for Android (ARM64).
 
-It provides cross-process memory read/write and syscall result shaping — **entirely from kernel space**. The target process receives no injected code, no extra mapping, no resident library. **There is nothing to scan, because nothing is there.**
+It provides cross-process memory read/write, syscall result shaping, and **zero-injection method-level hooks** (shadow-page dual view: original bytes never change, no resident code) — **entirely from kernel space**. The target process receives no resident code, no extra mapping, no resident library. **There is nothing to scan, because nothing is there.**
 
-The name is a tribute to the Windows kernel executive routine family (`Ke*`): `KeStackAttachProcess` — attach to a process, manipulate its memory, detach, leave nothing behind — is precisely what this framework does on Android.
+The name joins two lineages: `Ke`, the Windows kernel executive routine family (`KeStackAttachProcess` — attach to a process, manipulate its memory, detach, leave nothing behind), and `Posed`, the Xposed philosophy (method-level hooks, scope-based authorization). Same goals as the Xposed family, different methods. **KePosed does not run Xposed modules** — its modules are native binaries against a versioned kernel UAPI, not Java bridge modules; a philosophical descendant, not an API descendant.
 
-User-space hook frameworks (the Xposed family) must place executable code inside the target process. However hard they hide — magic wiping, classloader disguises, maps obfuscation — the payload *exists in memory*, and memory can be scanned. It is an arms race the hider eventually loses. KeModify breaks the loop by refusing to enter the arena:
+User-space hook frameworks (the Xposed family) must place executable code inside the target process. However hard they hide — magic wiping, classloader disguises, maps obfuscation — the payload *exists in memory*, and memory can be scanned. It is an arms race the hider eventually loses. KePosed breaks the loop by refusing to enter the arena:
 
-| | User-space hook frameworks | KeModify |
+| | User-space hook frameworks | KePosed |
 |---|---|---|
 | Payload location | Inside target process | Kernel space only |
-| Detectable artifacts | dex/ELF blobs, classloaders, entrypoint hooks, anonymous exec pages | **None** — target memory untouched except data you explicitly modify |
+| Detectable artifacts | dex/ELF blobs, classloaders, entrypoint hooks, anonymous exec pages | **None resident** — original bytes never change (hash-checks pass); only the data you explicitly modify differs |
 | Detection cost | Memory scan (cheap, getting cheaper) | Requires kernel introspection (unavailable to sandboxed apps) |
 
 > **Using an AI assistant (Copilot / Claude / GPT ...) for development on this project?** Read [README_AGENT.md](README_AGENT.md) first — it is written specifically for AI and contains the project's **non-negotiable design decisions, kernel-context red lines, and the Native API taxonomy**. Skipping it and editing code directly is very likely to produce bootloop-grade defects.
@@ -28,17 +28,17 @@ User-space hook frameworks (the Xposed family) must place executable code inside
 - **Kernel-only execution, userspace decision logic (the eBPF philosophy)**
   The kernel side exposes narrow, auditable primitives only — no scripting engine, no rule interpreter, no business logic. Decision logic lives in unprivileged userspace modules. A crashing module kills its own process — never the kernel, never the target.
 
-- **Unprivileged binary modules with capability tokens**
-  Modules are statically linked binaries running as a **non-root uid** — like Xposed modules are unprivileged apps. Every privileged action must be expressed as a KeModify primitive call through a token-authenticated channel; the kernel enforces each module's registered capability set (mem_read / mem_write / mem_search / syscall_shape ...). A module literally has no path to root that does not pass through the gatekeeper.
+- **Unprivileged binary modules with capability-scoped handles**
+  Modules are statically linked binaries running as a **non-root uid** — like Xposed modules are unprivileged apps. Every privileged action must be expressed as a KePosed primitive call through its kernel-issued handle (fd); the kernel enforces each module's registered capability set (mem_read / mem_write / mem_search / syscall_shape ...). A module literally has no path to root that does not pass through the gatekeeper.
 
 - **Native API in the Windows kernel taxonomy**
-  The kernel↔module protocol borrows the Windows kernel routine classification, organized by prefix family: `Ke` (execution), `Mm` (memory), `Ps` (process), `Zw` (syscall shaping), `Ob` (module registry). **No SDK — headers and a protocol document only.** The ABI is a stable, versioned syscall contract; modules may be closed-source, because the interface is the only contact surface.
+  The kernel↔module protocol borrows the Windows kernel routine classification, organized by prefix family: `Ke` (execution), `Mm` (memory), `Ps` (process), `Zw` (syscall shaping), `Ob` (module registry). **No SDK — headers and a protocol document only.** The ABI is a stable, versioned contract (ioctl over a kernel-issued handle); modules may be closed-source, because the interface is the only contact surface.
 
 - **Loader-agnostic**
-  `kemodify.kpm` is a standard KernelPatch Module and works with any conforming loader — [APatch](https://github.com/bmax121/APatch) (native KPM support), [SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra) (KPM bridge), or raw [KernelPatch](https://github.com/bmax121/KernelPatch) (`sc_kpm_load` / boot-image embedding). Loading is the loader's business, not the framework's; the framework never depends on any manager app.
+  `keposed.kpm` is a standard KernelPatch Module and works with any conforming loader — [APatch](https://github.com/bmax121/APatch) (native KPM support), [SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra) (KPM bridge), or raw [KernelPatch](https://github.com/bmax121/KernelPatch) (`sc_kpm_load` / boot-image embedding). Loading is the loader's business, not the framework's; the framework never depends on any manager app.
 
-- **Coexists with LSPosed — attack surfaces do not intersect**
-  Method-level in-process hooks remain LSPosed's domain; KeModify owns syscall shaping and data-level memory manipulation from outside the process. The two can run on one device without conflict. The userspace part ships as a KernelSU module whose module directory is deliberately namespaced (`manifest.toml`, not `module.prop`) so no manager ever mis-identifies the other's modules.
+- **Complementary to LSPosed — same goal, different methods**
+  LSPosed hooks in-process (ecosystem compatibility, the largest module ecosystem); KePosed hooks out-of-process from kernel space (zero footprint, detection-immune). Method-level hooks exist on both paths — resident form there, zero-injection shadow-page form here. The two can run on one device without conflict. The userspace part ships as a KernelSU module whose module directory is deliberately namespaced (`manifest.toml`, not `module.prop`) so no manager ever mis-identifies the other's modules.
 
 ## 📐 Architecture
 
@@ -46,21 +46,21 @@ User-space hook frameworks (the Xposed family) must place executable code inside
 ┌───────────────────────────────────────────────────────────┐
 │  User space                                                │
 │                                                            │
-│  kemodifyd (root daemon)      WebUI       Module binaries  │
+│  keposedd (root daemon)       WebUI       Module binaries  │
 │  module lifecycle, config,   (HTTP)      UNPRIVILEGED,    │
 │  privilege broker                         any license     │
 └──────────────┬─────────────────────────────▲───────────────┘
-               │ ioctl (privileged)          │ private syscall channel
-               │                             │ (token-authenticated)
+               │ ioctl (privileged)          │ handle channel (ioctl on fd)
+               │                             │ (fd passed via SCM_RIGHTS)
 ┌──────────────▼─────────────────────────────┴───────────────┐
-│  Kernel space — kemodify.kpm (KernelPatch Module)          │
+│  Kernel space — keposed.kpm (KernelPatch Module)           │
 │                                                            │
-│  Gateway      token auth, per-module capability enforcement│
+│  Gateway     handle auth, per-module capability enforcement│
 │  Ke routines  attach / detach, execution primitives        │
 │  Mm routines  cross-process read / write / pattern search  │
 │  Ps routines  process lookup, spawn/exit event notification│
 │  Zw routines  syscall result shaping                       │
-│  Ob routines  module registry: tokens, caps, revocation    │
+│  Ob routines  module registry: handles, caps, revocation   │
 └──────────────┬─────────────────────────────────────────────┘
                │ access_process_vm / hook_syscalln
 ┌──────────────▼─────────────────────────────────────────────┐
@@ -71,7 +71,7 @@ User-space hook frameworks (the Xposed family) must place executable code inside
 
 ## 🧩 Module system
 
-Modules are zip packages installed under `/data/adb/modules/kemodify/modules/<module-id>/` — nested below the framework's own KSU module directory, invisible to KSU's top-level scan, and removed together with the framework. The manifest is `manifest.toml` (deliberately **not** `module.prop`), so KSU/LSPosed managers never mis-identify framework modules.
+Modules are zip packages installed under `/data/adb/modules/keposed/modules/<module-id>/` — nested below the framework's own KSU module directory, invisible to KSU's top-level scan, and removed together with the framework. The manifest is `manifest.toml` (deliberately **not** `module.prop`), so KSU/LSPosed managers never mis-identify framework modules.
 
 ```toml
 id = "example"
@@ -85,11 +85,11 @@ mem_write = true
 syscall_shape = false
 ```
 
-At install time the daemon registers the module with the kernel (which mints a 128-bit token), then spawns `bin/<module-id>` dropped to an unprivileged uid, token passed via argv. Every gateway command is checked against the module's capability set **before** any argument parsing; violations return `-EACCES`. Uninstall revokes the token and kills the process — credentials die instantly.
+At install time the daemon registers the module with the kernel (which mints a per-module handle — an anonymous fd), then spawns `bin/<module-id>` dropped to an unprivileged uid, handle passed via SCM_RIGHTS fd passing. Every gateway command is checked against the module's capability set **before** any argument parsing; violations return `-EACCES`. Uninstall revokes the handle and kills the process — credentials die instantly.
 
 ## 📡 Native API
 
-Full protocol reference: [docs/native-api.md](docs/native-api.md) (the *KeModify Native API Reference*).
+Full protocol reference: [docs/native-api.md](docs/native-api.md) (the *KePosed Native API Reference*).
 
 | Family | Purpose | Representative routines |
 |---|---|---|
@@ -101,10 +101,10 @@ Full protocol reference: [docs/native-api.md](docs/native-api.md) (the *KeModify
 
 ## ⚠️ Honest capability boundary
 
-KeModify is **not** a universal Xposed replacement. What it can and cannot do, stated plainly:
+KePosed is **not** a universal Xposed replacement. What it can and cannot do, stated plainly:
 
 - ✅ **Clean (zero artifacts)** — syscall result shaping (path hiding, environment spoofing) and data-level memory patches (values, fields, property areas). No code enters the target, ever.
-- ⚠️ **Out of scope** — method-level logic hooks (arguments, return values, call chains) require in-process execution, which contradicts the core design. Use LSPosed for that; both frameworks coexist.
+- ✅ **Method-level hooks (v1, zero-injection form)** — shadow-page dual view: the original page is never modified (reads and hash-checks always see original bytes); hook logic exists only in the transient execution view, or as kernel-side static rules. Covers AOT/JIT/native targets; interpreted-only and inlined methods are documented residual gaps (README_AGENT.md §6.8). LSPosed remains the complementary path — same goal, different methods.
 - 🛡️ **Residual surface** — a target can hash its *own data* to detect data patches; but the verification logic's inputs can themselves be shaped at the syscall layer. Defense in depth favors the kernel side. Hardware-level introspection (JTAG, hypervisor-level DMA scanning) is explicitly out of scope.
 
 ## 📊 Project Status

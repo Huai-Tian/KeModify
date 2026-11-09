@@ -49,7 +49,8 @@ User-space hook frameworks (the Xposed family) must place executable code inside
 │  keposedd (root daemon)      WebUI       Module binaries   │
 │  CONTROL PLANE only:        (HTTP)      UNPRIVILEGED,      │
 │  install (mint handle), event-spawn,    any license        │
-│  net proxy, registry, WebUI config                         │
+│  net on/off switch (netns),                                │
+│  registry, WebUI config                                    │
 └──────────────┬─────────────────────────────▲───────────────┘
                │ control plane               │ DATA PLANE: ioctl on handle
                │ (handle mint & delivery)    │ (daemon NOT in the loop)
@@ -70,7 +71,9 @@ User-space hook frameworks (the Xposed family) must place executable code inside
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Data plane vs control plane.** Every hot-path primitive — memory read/write, pattern search, method hooks, watch rules — is issued by the module **directly to the kernel** via ioctl on its handle. The daemon is never in the data path: no added latency, no load, no coupling. It owns the control plane only: minting and delivering handles at install time, spawning modules on kernel events, the audited network proxy, and the persistent module registry. If the daemon dies, running modules and their handles are unaffected — a handle's lifetime is bound to the module process, not the daemon.
+**Data plane vs control plane.** Every hot-path primitive — memory read/write, pattern search, method hooks, watch rules — is issued by the module **directly to the kernel** via ioctl on its handle. The daemon is never in the data path: no added latency, no load, no coupling. It owns the control plane only: minting and delivering handles at install time, spawning modules on kernel events, the per-module network switch, and the persistent module registry. If the daemon dies, running modules and their handles are unaffected — a handle's lifetime is bound to the module process, not the daemon.
+
+**Module networking.** Networking is a module's native capability — **on by default**: the module connects directly, with no middleman. The user can flip it off at any time; the daemon (root) then moves the module process into an empty network namespace (`setns`, created on demand and destroyed on restore) — a physical cutoff: sockets still open, nothing ever leaves (no fingerprint of being blocked, nothing to bypass). Flipping it back restores normal networking.
 
 ## 🧩 Module system
 
@@ -86,6 +89,7 @@ mem_read = true
 mem_search = true
 mem_write = true
 syscall_shape = false
+net = true          # user can toggle at runtime (default on; off = netns cutoff)
 ```
 
 At install time the daemon registers the module with the kernel (which mints a per-module handle — an anonymous fd), then spawns `bin/<module-id>` dropped to an unprivileged uid, handle passed via SCM_RIGHTS fd passing. Every gateway command is checked against the module's capability set **before** any argument parsing; violations return `-EACCES`. Uninstall revokes the handle and kills the process — credentials die instantly.

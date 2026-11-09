@@ -8,7 +8,7 @@
 
 它在**纯内核态**提供跨进程内存读写、系统调用结果塑形与**零注入方法级 hook**(影子页双视图:原字节永不变、零驻留代码)。目标进程内没有常驻代码、没有多余的映射、没有常驻库。**扫不到任何东西,因为那里真的什么都没有。**
 
-名字连接两个血统:`Ke` = Windows 内核执行例程族(`KeStackAttachProcess`——附体进程、操纵内存、抽离、不留一物);`Posed` = Xposed 哲学(方法级 hook、作用域授权)。与 Xposed 家族目标相同、方法不同。**KePosed 不运行 Xposed 模块**——模块是对接版本化内核 UAPI 的原生二进制,不是 Java 桥模块;是哲学血统,不是 API 血统。
+名字连接两个血统:`Ke` 是**刻意的双关**——既是 **Kernel 的缩写**(本框架的根本身份:内核级),又是 Windows 内核执行例程族(`KeStackAttachProcess`——附体进程、操纵内存、抽离、不留一物);`Posed` = Xposed 哲学(方法级 hook、作用域授权)。与 Xposed 家族目标相同、方法不同。**KePosed 不运行 Xposed 模块**——模块是对接版本化内核 UAPI 的原生二进制,不是 Java 桥模块;是哲学血统,不是 API 血统。
 
 用户态 hook 框架(Xposed 系)必须把可执行代码放进目标进程。无论怎么隐藏——抹 magic、伪装 classloader、混淆 maps——载荷*存在于内存中*,而内存可以被扫描。这是一场隐藏方注定落后的拉锯战。KePosed 的解法是不进入这个战场:
 
@@ -106,7 +106,7 @@ syscall_shape = false
 | `Mm` | 内存管理 | `MmCopyVirtualMemory`, `MmScanVirtualMemory` |
 | `Ps` | 进程管理 | `PsLookupProcessByProcessId`, `PsSetCreateProcessNotifyRoutine` |
 | `Zw` | 系统调用塑形 | `ZwHookSyscall`, `ZwUnhookSyscall` |
-| `Ob` | 模块注册与凭据 | `ObRegisterModule`, `ObRevokeToken` |
+| `Ob` | 模块注册与句柄 | `ObRegisterModule`, `ObRevokeModule` |
 
 ## ⚠️ 诚实的能力边界
 

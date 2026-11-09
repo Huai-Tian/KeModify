@@ -8,7 +8,7 @@
 
 It provides cross-process memory read/write, syscall result shaping, and **zero-injection method-level hooks** (shadow-page dual view: original bytes never change, no resident code) — **entirely from kernel space**. The target process receives no resident code, no extra mapping, no resident library. **There is nothing to scan, because nothing is there.**
 
-The name joins two lineages: `Ke`, the Windows kernel executive routine family (`KeStackAttachProcess` — attach to a process, manipulate its memory, detach, leave nothing behind), and `Posed`, the Xposed philosophy (method-level hooks, scope-based authorization). Same goals as the Xposed family, different methods. **KePosed does not run Xposed modules** — its modules are native binaries against a versioned kernel UAPI, not Java bridge modules; a philosophical descendant, not an API descendant.
+The name joins two lineages: `Ke` is a **deliberate double meaning** — the abbreviation of **Kernel** (the framework's fundamental identity: kernel-level), and the Windows kernel executive routine family (`KeStackAttachProcess` — attach to a process, manipulate its memory, detach, leave nothing behind); `Posed`, the Xposed philosophy (method-level hooks, scope-based authorization). Same goals as the Xposed family, different methods. **KePosed does not run Xposed modules** — its modules are native binaries against a versioned kernel UAPI, not Java bridge modules; a philosophical descendant, not an API descendant.
 
 User-space hook frameworks (the Xposed family) must place executable code inside the target process. However hard they hide — magic wiping, classloader disguises, maps obfuscation — the payload *exists in memory*, and memory can be scanned. It is an arms race the hider eventually loses. KePosed breaks the loop by refusing to enter the arena:
 
@@ -106,7 +106,7 @@ Full protocol reference: [docs/native-api.md](docs/native-api.md) (the *KePosed 
 | `Mm` | memory management | `MmCopyVirtualMemory`, `MmScanVirtualMemory` |
 | `Ps` | process management | `PsLookupProcessByProcessId`, `PsSetCreateProcessNotifyRoutine` |
 | `Zw` | syscall shaping | `ZwHookSyscall`, `ZwUnhookSyscall` |
-| `Ob` | module registry & credentials | `ObRegisterModule`, `ObRevokeToken` |
+| `Ob` | module registry & handles | `ObRegisterModule`, `ObRevokeModule` |
 
 ## ⚠️ Honest capability boundary
 

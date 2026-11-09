@@ -37,6 +37,9 @@ User-space hook frameworks (the Xposed family) must place executable code inside
 - **Loader-agnostic**
   `keposed.kpm` is a standard KernelPatch Module and works with any conforming loader — [APatch](https://github.com/bmax121/APatch) (native KPM support), [SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra) (KPM bridge), or raw [KernelPatch](https://github.com/bmax121/KernelPatch) (`sc_kpm_load` / boot-image embedding). Loading is the loader's business, not the framework's; the framework never depends on any manager app.
 
+- **Modules isolated from each other**
+  All modules share one identity on purpose (least privilege), so isolation comes from construction instead: each module is born into its own process-namespace and mount-namespace **cell** — sibling modules simply do not exist in each other's world (no ptrace, no fd theft, no file snooping between modules; the paths are absent, not blocked). The kernel-side rules a module registers can never exceed the capabilities and scope the user granted at install.
+
 - **Complementary to LSPosed — same goal, different methods**
   LSPosed hooks in-process (ecosystem compatibility, the largest module ecosystem); KePosed hooks out-of-process from kernel space (zero footprint, detection-immune). Method-level hooks exist on both paths — resident form there, zero-injection shadow-page form here. The two can run on one device without conflict. The userspace part ships as a KernelSU module whose module directory is deliberately namespaced (`manifest.toml`, not `module.prop`) so no manager ever mis-identifies the other's modules.
 
@@ -73,7 +76,7 @@ User-space hook frameworks (the Xposed family) must place executable code inside
 
 **Data plane vs control plane.** Every hot-path primitive — memory read/write, pattern search, method hooks, watch rules — is issued by the module **directly to the kernel** via ioctl on its handle. The daemon is never in the data path: no added latency, no load, no coupling. It owns the control plane only: minting and delivering handles at install time, spawning modules on kernel events, the per-module network switch, and the persistent module registry. If the daemon dies, running modules and their handles are unaffected — a handle's lifetime is bound to the module process, not the daemon.
 
-**Module networking.** Networking is a module's native capability — **on by default**: the module connects directly, with no middleman. The user can flip it off at any time; the daemon (root) then moves the module process into an empty network namespace (`setns`, created on demand and destroyed on restore) — a physical cutoff: sockets still open, nothing ever leaves (no fingerprint of being blocked, nothing to bypass). Flipping it back restores normal networking.
+**Module networking.** Networking is a module's native capability — **on by default**: the module connects directly, with no middleman. The user can flip it off at any time. The cutoff is physical: the module is **born** into an empty network namespace (no interfaces, no routes, no DNS) — sockets still open normally, but not a single byte ever leaves (the error is `ENETUNREACH`, exactly what a machine with no network returns — no "blocked" fingerprint, nothing to bypass). Pre-stocked sockets are structurally impossible: a process born offline never had a network to hoard from. Flipping the switch back simply respawns the module with normal networking. The kernel-side rules a module registered (watch rules, method hooks) live in the kernel and survive the restart.
 
 ## 🧩 Module system
 
@@ -89,10 +92,9 @@ mem_read = true
 mem_search = true
 mem_write = true
 syscall_shape = false
-net = true          # user can toggle at runtime (default on; off = netns cutoff)
 ```
 
-At install time the daemon registers the module with the kernel (which mints a per-module handle — an anonymous fd), then spawns `bin/<module-id>` dropped to an unprivileged uid, handle passed via SCM_RIGHTS fd passing. Every gateway command is checked against the module's capability set **before** any argument parsing; violations return `-EACCES`. Uninstall revokes the handle and kills the process — credentials die instantly.
+At install time the daemon registers the module with the kernel (which mints a per-module handle — an anonymous fd). When a target process in the module's scope appears, the daemon spawns `bin/<module-id>`: the child is born into its isolation namespaces (and into an empty network namespace if the user has switched networking off), then dropped to an unprivileged uid, with the handle passed via SCM_RIGHTS fd passing. Every gateway command is checked against the module's capability set **before** any argument parsing; violations return `-EACCES`. Uninstall revokes the handle and kills the process — credentials die instantly.
 
 ## 📡 Native API
 
@@ -111,12 +113,12 @@ Full protocol reference: [docs/native-api.md](docs/native-api.md) (the *KePosed 
 KePosed is **not** a universal Xposed replacement. What it can and cannot do, stated plainly:
 
 - ✅ **Clean (zero artifacts)** — syscall result shaping (path hiding, environment spoofing) and data-level memory patches (values, fields, property areas). No code enters the target, ever.
-- ✅ **Method-level hooks (v1, zero-injection form)** — shadow-page dual view: the original page is never modified (reads and hash-checks always see original bytes); hook logic exists only in the transient execution view, or as kernel-side static rules. Covers AOT/JIT/native targets; interpreted-only and inlined methods are documented residual gaps (README_AGENT.md §6.8). LSPosed remains the complementary path — same goal, different methods.
+- ✅ **Method-level hooks (v1, zero-injection form)** — shadow-page dual view: the original page is never modified (reads and hash-checks always see original bytes); at call time the target thread briefly executes the module's callback via the module's own memory image — the image belongs to the module process, is invisible to the target from any angle, and is never resident anywhere in the target. Simple rules (always-return-X, always-skip) run as kernel-side static rules with no module code involved. Covers AOT/JIT/native targets, hot paths included (a few microseconds per call); interpreted-only and inlined methods are documented residual gaps (README_AGENT.md §6.8). LSPosed remains the complementary path — same goal, different methods.
 - 🛡️ **Residual surface** — a target can hash its *own data* to detect data patches; but the verification logic's inputs can themselves be shaped at the syscall layer. Defense in depth favors the kernel side. Hardware-level introspection (JTAG, hypervisor-level DMA scanning) is explicitly out of scope.
 
 ## 📊 Project Status
 
-**Pre-alpha — design phase.** The repository currently holds the architecture, the Native API taxonomy, and the licensing groundwork. The gateway protocol and primitive set are being implemented. Expect the ABI to change until v0.1.0. A kernel-space bug can bootloop the device — always test on a disposable device.
+**Pre-alpha — design phase.** The repository currently holds the architecture, the Native API taxonomy, and the licensing groundwork. The gateway protocol and primitive set are being implemented. **v1 is the endgame** — capabilities either ship in v1 or are cut with the reason recorded; there is no "next version will fix it". Expect the ABI to change until v0.1.0. A kernel-space bug can bootloop the device — always test on a disposable device.
 
 ## 🚫 Non-Commercial Statement
 

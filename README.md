@@ -46,12 +46,13 @@ User-space hook frameworks (the Xposed family) must place executable code inside
 ┌───────────────────────────────────────────────────────────┐
 │  User space                                                │
 │                                                            │
-│  keposedd (root daemon)       WebUI       Module binaries  │
-│  module lifecycle, config,   (HTTP)      UNPRIVILEGED,    │
-│  privilege broker                         any license     │
+│  keposedd (root daemon)      WebUI       Module binaries   │
+│  CONTROL PLANE only:        (HTTP)      UNPRIVILEGED,      │
+│  install (mint handle), event-spawn,    any license        │
+│  net proxy, registry, WebUI config                         │
 └──────────────┬─────────────────────────────▲───────────────┘
-               │ ioctl (privileged)          │ handle channel (ioctl on fd)
-               │                             │ (fd passed via SCM_RIGHTS)
+               │ control plane               │ DATA PLANE: ioctl on handle
+               │ (handle mint & delivery)    │ (daemon NOT in the loop)
 ┌──────────────▼─────────────────────────────┴───────────────┐
 │  Kernel space — keposed.kpm (KernelPatch Module)           │
 │                                                            │
@@ -68,6 +69,8 @@ User-space hook frameworks (the Xposed family) must place executable code inside
 │  Only its data changes, when a module decides so.          │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Data plane vs control plane.** Every hot-path primitive — memory read/write, pattern search, method hooks, watch rules — is issued by the module **directly to the kernel** via ioctl on its handle. The daemon is never in the data path: no added latency, no load, no coupling. It owns the control plane only: minting and delivering handles at install time, spawning modules on kernel events, the audited network proxy, and the persistent module registry. If the daemon dies, running modules and their handles are unaffected — a handle's lifetime is bound to the module process, not the daemon.
 
 ## 🧩 Module system
 
